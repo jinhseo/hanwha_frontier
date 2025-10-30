@@ -82,6 +82,12 @@ class FrontierDetector:
             queue_size=1
         )
 
+        self.global_goal_sub = rospy.Subscriber(
+            '/move_base_simple/goal',
+            PoseStamped,
+            self.global_goal_callback
+        )
+                
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
@@ -189,6 +195,19 @@ class FrontierDetector:
         rospy.loginfo(f"Robot orientation: roll={roll_deg:.1f}°, pitch={pitch_deg:.1f}°, yaw={yaw_deg:.1f}°")
         rospy.loginfo(f"Robot tilt: total={total_tilt:.1f}°")
 
+    def global_goal_callback(self, msg):
+        """RViz '2D Nav Goal' 클릭 시 호출되어 global_goal 업데이트"""
+        # msg는 PoseStamped 타입입니다.
+        # RViz에서 설정한 Fixed Frame이 'aligned_basis'라고 가정합니다.
+        self.global_goal_x = msg.pose.position.x
+        self.global_goal_y = msg.pose.position.y
+
+        # 파라미터 서버에도 업데이트 (다른 노드와 공유 시 유용)
+        rospy.set_param('/global_goal_x', self.global_goal_x)
+        rospy.set_param('/global_goal_y', self.global_goal_y)
+
+        rospy.loginfo(f"New global goal set from RViz: ({self.global_goal_x:.2f}, {self.global_goal_y:.2f})")
+        
     def save_robot_position(self, event):
         """1초마다 로봇의 현재 위치를 저장"""
         if self.odom_position_x is not None and self.odom_position_y is not None:
@@ -282,18 +301,101 @@ class FrontierDetector:
 
         self.robot_path_pub.publish(marker_array)
 
+    # def visualize_global_goal_direction(self):
+    #     """로봇을 중심으로 글로벌 골 방향을 가리키는 화살표 시각화"""
+    #     marker_array = MarkerArray()
+        
+    #     # 글로벌 골을 로컬 좌표계로 변환
+    #     transformed_goal = self.transform_global_goal_to_local()
+        
+    #     # 화살표 길이 (로봇에서 글로벌 골까지의 거리, 최대 5m)
+    #     goal_distance = math.sqrt(transformed_goal[0]**2 + transformed_goal[1]**2)
+    #     arrow_length = min(goal_distance, 5.0)  # 최대 5m로 제한
+        
+    #     # 화살표 마커 생성
+    #     arrow_marker = Marker()
+    #     arrow_marker.header.frame_id = "aligned_basis"
+    #     arrow_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
+    #     arrow_marker.ns = "global_goal_direction"
+    #     arrow_marker.id = 0
+    #     arrow_marker.type = Marker.ARROW
+    #     arrow_marker.action = Marker.ADD
+        
+    #     # 화살표 시작점 (로봇 위치)
+    #     start_point = Point()
+    #     start_point.x = 0.0  # 로봇 중심
+    #     start_point.y = 0.0
+    #     start_point.z = 0.5  # 지면에서 0.5m 위
+        
+    #     # 화살표 끝점 (글로벌 골 방향)
+    #     end_point = Point()
+    #     if goal_distance > 0:
+    #         # 정규화된 방향 벡터에 화살표 길이 적용
+    #         end_point.x = (transformed_goal[0] / goal_distance) * arrow_length
+    #         end_point.y = (transformed_goal[1] / goal_distance) * arrow_length
+    #     else:
+    #         end_point.x = 0.0
+    #         end_point.y = 0.0
+    #     end_point.z = 0.5
+        
+    #     arrow_marker.points = [start_point, end_point]
+        
+    #     # 화살표 스타일 설정
+    #     arrow_marker.scale.x = 0.2  # 화살표 몸통 두께 (0.3 → 0.2)
+    #     arrow_marker.scale.y = 0.3  # 화살표 머리 두께 (0.5 → 0.3)
+    #     arrow_marker.scale.z = 0.0  # 2D 화살표
+        
+    #     # 밝은 노란색으로 표시
+    #     arrow_marker.color = ColorRGBA()
+    #     arrow_marker.color.r = 1.0  # 노란색
+    #     arrow_marker.color.g = 1.0
+    #     arrow_marker.color.b = 0.0
+    #     arrow_marker.color.a = 0.8  # 약간 투명
+        
+    #     marker_array.markers.append(arrow_marker)
+        
+    #     # 글로벌 골 방향 각도 표시를 위한 텍스트 마커
+    #     text_marker = Marker()
+    #     text_marker.header.frame_id = "aligned_basis"
+    #     text_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
+    #     text_marker.ns = "global_goal_direction"
+    #     text_marker.id = 1
+    #     text_marker.type = Marker.TEXT_VIEW_FACING
+    #     text_marker.action = Marker.ADD
+        
+    #     # 텍스트 위치 (화살표 중간 지점)
+    #     text_marker.pose.position.x = end_point.x / 2
+    #     text_marker.pose.position.y = end_point.y / 2
+    #     text_marker.pose.position.z = 1.0  # 화살표 위에 표시
+        
+    #     # 각도 계산 및 표시
+    #     goal_angle = math.atan2(transformed_goal[1], transformed_goal[0])
+    #     text_marker.text = f"Goal: {math.degrees(goal_angle):.0f}°"
+        
+    #     # 텍스트 스타일
+    #     text_marker.scale.z = 0.2  # 텍스트 크기 (0.3 → 0.2)
+    #     text_marker.color = ColorRGBA()
+    #     text_marker.color.r = 1.0  # 흰색
+    #     text_marker.color.g = 1.0
+    #     text_marker.color.b = 1.0
+    #     text_marker.color.a = 1.0
+        
+    #     marker_array.markers.append(text_marker)
+        
+    #     self.global_goal_direction_pub.publish(marker_array)
+
     def visualize_global_goal_direction(self):
         """로봇을 중심으로 글로벌 골 방향을 가리키는 화살표 시각화"""
         marker_array = MarkerArray()
         
-        # 글로벌 골을 로컬 좌표계로 변환
-        transformed_goal = self.transform_global_goal_to_local()
+        # 1. 글로벌 골까지의 방향 벡터 (aligned_basis 프레임 기준)
+        dx = self.global_goal_x - self.odom_position_x
+        dy = self.global_goal_y - self.odom_position_y
         
-        # 화살표 길이 (로봇에서 글로벌 골까지의 거리, 최대 5m)
-        goal_distance = math.sqrt(transformed_goal[0]**2 + transformed_goal[1]**2)
+        goal_distance = math.sqrt(dx**2 + dy**2)
         arrow_length = min(goal_distance, 5.0)  # 최대 5m로 제한
         
-        # 화살표 마커 생성
+        # 2. 화살표 마커 생성
         arrow_marker = Marker()
         arrow_marker.header.frame_id = "aligned_basis"
         arrow_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
@@ -302,40 +404,39 @@ class FrontierDetector:
         arrow_marker.type = Marker.ARROW
         arrow_marker.action = Marker.ADD
         
-        # 화살표 시작점 (로봇 위치)
+        # 3. 화살표 시작점 (로봇의 현재 위치)
         start_point = Point()
-        start_point.x = 0.0  # 로봇 중심
-        start_point.y = 0.0
+        start_point.x = self.odom_position_x
+        start_point.y = self.odom_position_y
         start_point.z = 0.5  # 지면에서 0.5m 위
         
-        # 화살표 끝점 (글로벌 골 방향)
+        # 4. 화살표 끝점 (글로벌 골 방향)
         end_point = Point()
         if goal_distance > 0:
             # 정규화된 방향 벡터에 화살표 길이 적용
-            end_point.x = (transformed_goal[0] / goal_distance) * arrow_length
-            end_point.y = (transformed_goal[1] / goal_distance) * arrow_length
+            end_point.x = self.odom_position_x + (dx / goal_distance) * arrow_length
+            end_point.y = self.odom_position_y + (dy / goal_distance) * arrow_length
         else:
-            end_point.x = 0.0
-            end_point.y = 0.0
+            end_point.x = self.odom_position_x
+            end_point.y = self.odom_position_y
         end_point.z = 0.5
         
         arrow_marker.points = [start_point, end_point]
         
         # 화살표 스타일 설정
-        arrow_marker.scale.x = 0.2  # 화살표 몸통 두께 (0.3 → 0.2)
-        arrow_marker.scale.y = 0.3  # 화살표 머리 두께 (0.5 → 0.3)
-        arrow_marker.scale.z = 0.0  # 2D 화살표
+        arrow_marker.scale.x = 0.2
+        arrow_marker.scale.y = 0.3
+        arrow_marker.scale.z = 0.0
         
-        # 밝은 노란색으로 표시
         arrow_marker.color = ColorRGBA()
-        arrow_marker.color.r = 1.0  # 노란색
+        arrow_marker.color.r = 1.0
         arrow_marker.color.g = 1.0
         arrow_marker.color.b = 0.0
-        arrow_marker.color.a = 0.8  # 약간 투명
+        arrow_marker.color.a = 0.8
         
         marker_array.markers.append(arrow_marker)
         
-        # 글로벌 골 방향 각도 표시를 위한 텍스트 마커
+        # 5. 글로벌 골 방향 각도 표시를 위한 텍스트 마커
         text_marker = Marker()
         text_marker.header.frame_id = "aligned_basis"
         text_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
@@ -345,26 +446,25 @@ class FrontierDetector:
         text_marker.action = Marker.ADD
         
         # 텍스트 위치 (화살표 중간 지점)
-        text_marker.pose.position.x = end_point.x / 2
-        text_marker.pose.position.y = end_point.y / 2
+        text_marker.pose.position.x = (start_point.x + end_point.x) / 2
+        text_marker.pose.position.y = (start_point.y + end_point.y) / 2
         text_marker.pose.position.z = 1.0  # 화살표 위에 표시
         
-        # 각도 계산 및 표시
-        goal_angle = math.atan2(transformed_goal[1], transformed_goal[0])
-        text_marker.text = f"Goal: {math.degrees(goal_angle):.0f}°"
+        # 각도 계산 (로봇의 yaw를 기준으로 한 상대 각도)
+        # 로봇 프레임 기준의 골 각도
+        local_goal_angle = math.atan2(dy, dx) - self.odom_rotation_yaw
+        # -pi ~ pi 범위로 정규화
+        local_goal_angle = (local_goal_angle + math.pi) % (2 * math.pi) - math.pi 
         
-        # 텍스트 스타일
-        text_marker.scale.z = 0.2  # 텍스트 크기 (0.3 → 0.2)
-        text_marker.color = ColorRGBA()
-        text_marker.color.r = 1.0  # 흰색
-        text_marker.color.g = 1.0
-        text_marker.color.b = 1.0
-        text_marker.color.a = 1.0
+        text_marker.text = f"Goal: {math.degrees(local_goal_angle):.0f}°"
+        
+        text_marker.scale.z = 0.2
+        text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
         
         marker_array.markers.append(text_marker)
         
         self.global_goal_direction_pub.publish(marker_array)
-
+        
     def get_layer_data(self, layer_name):
         try:
             if layer_name not in self.grid_map.layers:
@@ -747,8 +847,8 @@ class FrontierDetector:
 
             selected_frontiers = self.transform_local_to_world(selected_frontier)
 
-            rospy.set_param('/global_goal_x', selected_frontier[0])
-            rospy.set_param('/global_goal_y', selected_frontier[1])
+            # rospy.set_param('/global_goal_x', selected_frontier[0])
+            # rospy.set_param('/global_goal_y', selected_frontier[1])
 
 
             marker_array.markers.append(marker)
@@ -771,8 +871,10 @@ class FrontierDetector:
         goal_marker.type = Marker.SPHERE
         goal_marker.action = Marker.ADD
 
-        goal_marker.pose.position.x = transformed_goal[0]
-        goal_marker.pose.position.y = transformed_goal[1]
+        # goal_marker.pose.position.x = transformed_goal[0]
+        # goal_marker.pose.position.y = transformed_goal[1]
+        goal_marker.pose.position.x = self.global_goal_x 
+        goal_marker.pose.position.y = self.global_goal_y
         goal_marker.pose.position.z = 2.0  # 더 높게 표시
 
         # Orientation 명시적으로 설정 (quaternion 초기화)

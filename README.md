@@ -7,5 +7,5 @@
     -> 이 위치 기준으로 best frontier 찾음
 - frontier_detector_finetuning.py : finetuning 중 + goal 방향 및 odom 방향에 frontier 후보 더 뽑히도록 구현
   - in_the_planning_module_folder에 있는 cfg 폴더 & CMakeList, package.xml를 planning_module 폴더에 복사
-  - rosrun planning_module frontier_detector_finetuning.py
-  - rosrun rqt_reconfigure rqt_reconfigure -> fontier_detector 더블클릭 -> 스크롤로 조절
+  - `rosrun planning_module frontier_detector_finetuning.py` 실행
+  - `rosrun rqt_reconfigure rqt_reconfigure` 실행 -> `fontier_detector` 더블클릭 -> 스크롤로 조절

@@ -120,8 +120,7 @@ class FrontierDetector:
         self.local_goal_pub = rospy.Publisher('/local_goal', PoseStamped, queue_size=1, latch=True)
         self.robot_path_pub = rospy.Publisher('/robot_path', MarkerArray, queue_size=1, latch=True)
         self.global_goal_direction_pub = rospy.Publisher('/global_goal_direction', MarkerArray, queue_size=1, latch=True)
-        self.goal_projection_pub = rospy.Publisher('/goal_projection_visualization', Marker, queue_size=1, latch=True)
-        self.yaw_viz_pub = rospy.Publisher('/robot_yaw_visualization', Marker, queue_size=1, latch=True) # <--- 추가
+
 
         self.global_goal_sub = rospy.Subscriber(
             '/move_base_simple/goal',
@@ -240,13 +239,13 @@ class FrontierDetector:
             self.origin_x = msg.info.pose.position.x - self.width/2
             self.origin_y = msg.info.pose.position.y - self.height/2
 
-            # rospy.loginfo(f"Original GridMap Info:")
-            # rospy.loginfo(f"  Resolution: {self.resolution}")
-            # rospy.loginfo(f"  Width: {self.width}, Height: {self.height}")
-            # rospy.loginfo(f"  Pose: ({msg.info.pose.position.x:.2f}, {msg.info.pose.position.y:.2f})")
-            # rospy.loginfo(f"  Orientation: ({msg.info.pose.orientation.x:.3f}, {msg.info.pose.orientation.y:.3f}, {msg.info.pose.orientation.z:.3f}, {msg.info.pose.orientation.w:.3f})")
-            # rospy.loginfo(f"  Frame ID: {msg.info.header.frame_id}")
-            # rospy.loginfo(f"  Calculated Origin: ({self.origin_x:.2f}, {self.origin_y:.2f})")
+            rospy.loginfo(f"Original GridMap Info:")
+            rospy.loginfo(f"  Resolution: {self.resolution}")
+            rospy.loginfo(f"  Width: {self.width}, Height: {self.height}")
+            rospy.loginfo(f"  Pose: ({msg.info.pose.position.x:.2f}, {msg.info.pose.position.y:.2f})")
+            rospy.loginfo(f"  Orientation: ({msg.info.pose.orientation.x:.3f}, {msg.info.pose.orientation.y:.3f}, {msg.info.pose.orientation.z:.3f}, {msg.info.pose.orientation.w:.3f})")
+            rospy.loginfo(f"  Frame ID: {msg.info.header.frame_id}")
+            rospy.loginfo(f"  Calculated Origin: ({self.origin_x:.2f}, {self.origin_y:.2f})")
 
             inclination_risk = self.get_layer_data('inclination_risk')
             collision_risk = self.get_layer_data('collision_risk')
@@ -258,12 +257,7 @@ class FrontierDetector:
                 if traversability_map is not None:
                     self.last_traversability_map = traversability_map
 
-                    transformed_global_goal = self.transform_global_goal_to_local()
-                    self.visualize_goal_projection(transformed_global_goal)
-
                     frontiers = self.find_frontiers(traversability_map)
-                    # transformed_global_goal = self.transform_global_goal_to_local()
-                    # self.visualize_goal_projection(transformed_global_goal)
 
                     if frontiers:
                         transformed_global_goal = self.transform_global_goal_to_local()
@@ -279,7 +273,6 @@ class FrontierDetector:
                         self.visualize_frontiers(frontiers, selected_frontier)
                         self.visualize_global_goal()
                         self.visualize_global_goal_direction()
-                        self.visualize_robot_yaw()
 
                         # 저장 (다음 시각화를 위해)
                         self.last_frontiers = frontiers
@@ -290,7 +283,6 @@ class FrontierDetector:
                         self.visualize_frontiers([], None)  # 빈 리스트로 호출하여 이전 마커들 삭제
                         self.visualize_global_goal()
                         self.visualize_global_goal_direction()
-                        self.visualize_robot_yaw()
                         self.last_frontiers = None
                         self.last_selected_frontier = None
                 else:
@@ -300,50 +292,6 @@ class FrontierDetector:
 
         except Exception as e:
             rospy.logerr(f"Error processing grid map: {e}")
-
-    def visualize_robot_yaw(self):
-        """로봇의 현재 Yaw (진행 방향)을 화살표로 시각화"""
-        
-        # 1. 화살표 길이 (적당히 2m로 고정)
-        arrow_length = 2.0 
-
-        # 2. 화살표 마커 생성
-        yaw_marker = Marker()
-        yaw_marker.header.frame_id = "world" # Odometry 기준이므로 'world' 프레임
-        yaw_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
-        yaw_marker.ns = "robot_yaw"
-        yaw_marker.id = 0
-        yaw_marker.type = Marker.ARROW
-        yaw_marker.action = Marker.ADD
-        
-        # 3. 화살표 시작점 (로봇의 현재 위치)
-        start_point = Point()
-        start_point.x = self.odom_position_x
-        start_point.y = self.odom_position_y
-        start_point.z = 0.5  # 지면에서 0.5m 위 (global_goal_direction과 같은 높이)
-        
-        # 4. 화살표 끝점 (Yaw 방향으로 arrow_length 만큼)
-        end_point = Point()
-        end_point.x = self.odom_position_x + arrow_length * math.cos(self.odom_rotation_yaw)
-        end_point.y = self.odom_position_y + arrow_length * math.sin(self.odom_rotation_yaw)
-        end_point.z = 0.5
-        
-        yaw_marker.points = [start_point, end_point]
-        
-        # 5. 화살표 스타일 설정
-        yaw_marker.scale.x = 0.15  # 몸통 두께
-        yaw_marker.scale.y = 0.25  # 머리 두께
-        yaw_marker.scale.z = 0.0
-        
-        # 6. 색상: 마젠타 (Magenta) - 다른 시각화와 겹치지 않게
-        yaw_marker.color = ColorRGBA()
-        yaw_marker.color.r = 1.0
-        yaw_marker.color.g = 0.0
-        yaw_marker.color.b = 1.0
-        yaw_marker.color.a = 0.8
-        
-        # 7. 발행
-        self.yaw_viz_pub.publish(yaw_marker)
 
     def odom_callback(self, msg):
         prev_yaw = self.odom_rotation_yaw
@@ -369,60 +317,19 @@ class FrontierDetector:
         rospy.loginfo(f"Robot orientation: roll={roll_deg:.1f}°, pitch={pitch_deg:.1f}°, yaw={yaw_deg:.1f}°")
         rospy.loginfo(f"Robot tilt: total={total_tilt:.1f}°")
 
-    # def global_goal_callback(self, msg):
-    #     """RViz '2D Nav Goal' 클릭 시 호출되어 global_goal 업데이트"""
-    #     # msg는 PoseStamped 타입입니다.
-    #     # RViz에서 설정한 Fixed Frame이 'aligned_basis'라고 가정합니다.
-    #     self.global_goal_x = msg.pose.position.x
-    #     self.global_goal_y = msg.pose.position.y
-
-    #     # 파라미터 서버에도 업데이트 (다른 노드와 공유 시 유용)
-    #     rospy.set_param('/global_goal_x', self.global_goal_x)
-    #     rospy.set_param('/global_goal_y', self.global_goal_y)
-
-    #     rospy.loginfo(f"New global goal set from RViz: ({self.global_goal_x:.2f}, {self.global_goal_y:.2f})")
     def global_goal_callback(self, msg):
         """RViz '2D Nav Goal' 클릭 시 호출되어 global_goal 업데이트"""
+        # msg는 PoseStamped 타입입니다.
+        # RViz에서 설정한 Fixed Frame이 'aligned_basis'라고 가정합니다.
+        self.global_goal_x = msg.pose.position.x
+        self.global_goal_y = msg.pose.position.y
+
+        # 파라미터 서버에도 업데이트 (다른 노드와 공유 시 유용)
+        rospy.set_param('/global_goal_x', self.global_goal_x)
+        rospy.set_param('/global_goal_y', self.global_goal_y)
+
+        rospy.loginfo(f"New global goal set from RViz: ({self.global_goal_x:.2f}, {self.global_goal_y:.2f})")
         
-        target_frame = "world"
-        source_frame = msg.header.frame_id
-        
-        rospy.loginfo(f"Attempting to set new goal from RViz. (Source: {source_frame})")
-
-        try:
-            # ★★★★★★★★★★★★★★★★★★★★★★★
-            # 해결책: 타임스탬프를 rospy.Time(0)으로 설정하여
-            # "가장 최신의" TF transform을 사용하도록 강제합니다.
-            # rosbag 재생 시 발생하는 타임스탬프 불일치 문제 해결
-            # ★★★★★★★★★★★★★★★★★★★★★★★
-            pose_to_transform = PoseStamped()
-            pose_to_transform.header.frame_id = source_frame
-            pose_to_transform.header.stamp = rospy.Time(0) # <--- 이것이 핵심입니다!
-            pose_to_transform.pose = msg.pose # 원본 msg의 pose 데이터 사용
-            
-            # 원본 msg 대신, 타임스탬프가 0인 복사본(pose_to_transform)을 변환합니다.
-            transformed_pose_stamped = self.tf_buffer.transform(
-                pose_to_transform, 
-                target_frame, 
-                rospy.Duration(1.0)
-            )
-            # ★★★★★★★★★★★★★★★★★★★★★★★
-
-            # 변환된 좌표를 global_goal로 저장
-            self.global_goal_x = transformed_pose_stamped.pose.position.x
-            self.global_goal_y = transformed_pose_stamped.pose.position.y
-
-            # 파라미터 서버에도 업데이트
-            rospy.set_param('/global_goal_x', self.global_goal_x)
-            rospy.set_param('/global_goal_y', self.global_goal_y)
-
-            rospy.loginfo(f"✅ [SUCCESS] New global goal set in {target_frame}: "
-                          f"({self.global_goal_x:.2f}, {self.global_goal_y:.2f})")
-
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-            rospy.logerr(f"❌ [FAIL] Failed to transform global goal from {source_frame} to {target_frame}: {e}")
-            rospy.logwarn("Global goal was NOT updated. Check TF tree (is 'world' frame available?).")
-
     def save_robot_position(self, event):
         """1초마다 로봇의 현재 위치를 저장"""
         if self.odom_position_x is not None and self.odom_position_y is not None:
@@ -453,7 +360,7 @@ class FrontierDetector:
         # 기존 경로 마커들 삭제
         for i in range(len(self.robot_path)):
             delete_marker = Marker()
-            delete_marker.header.frame_id = "world"
+            delete_marker.header.frame_id = "aligned_basis"
             delete_marker.header.stamp = rospy.Time.now()
             delete_marker.ns = "robot_path"
             delete_marker.id = i
@@ -462,7 +369,7 @@ class FrontierDetector:
 
         # 경로를 선으로 연결하는 마커 생성
         line_marker = Marker()
-        line_marker.header.frame_id = "world"
+        line_marker.header.frame_id = "aligned_basis"
         line_marker.header.stamp = rospy.Time.now()
         line_marker.ns = "robot_path"
         line_marker.id = 0
@@ -490,7 +397,7 @@ class FrontierDetector:
         # 현재 위치를 특별한 마커로 표시
         if self.robot_path:
             current_marker = Marker()
-            current_marker.header.frame_id = "world"
+            current_marker.header.frame_id = "aligned_basis"
             current_marker.header.stamp = rospy.Time.now()
             current_marker.ns = "robot_path"
             current_marker.id = 1
@@ -614,7 +521,7 @@ class FrontierDetector:
         
         # 2. 화살표 마커 생성
         arrow_marker = Marker()
-        arrow_marker.header.frame_id = "world"
+        arrow_marker.header.frame_id = "aligned_basis"
         arrow_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
         arrow_marker.ns = "global_goal_direction"
         arrow_marker.id = 0
@@ -655,7 +562,7 @@ class FrontierDetector:
         
         # 5. 글로벌 골 방향 각도 표시를 위한 텍스트 마커
         text_marker = Marker()
-        text_marker.header.frame_id = "world"
+        text_marker.header.frame_id = "aligned_basis"
         text_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
         text_marker.ns = "global_goal_direction"
         text_marker.id = 1
@@ -681,7 +588,6 @@ class FrontierDetector:
         marker_array.markers.append(text_marker)
         
         self.global_goal_direction_pub.publish(marker_array)
-        # self.goal_projection_pub.publish(marker_array)
         
     def get_layer_data(self, layer_name):
         try:
@@ -703,34 +609,6 @@ class FrontierDetector:
             rospy.logerr(f"Error getting layer data for {layer_name}: {e}")
             return None
 
-    def visualize_goal_projection(self, transformed_global_goal):
-        """글로벌 골이 aligned_basis 프레임에 투영된 위치를 시각화"""
-        if transformed_global_goal is None:
-            return
-
-        marker = Marker()
-        marker.header.frame_id = "aligned_basis" # 로컬 프레임
-        marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
-        marker.ns = "goal_projection"
-        marker.id = 0
-        marker.type = Marker.CUBE # 큐브로 표시 (기존 골과 다르게)
-        marker.action = Marker.ADD
-
-        # transformed_global_goal 좌표 사용
-        marker.pose.position.x = transformed_global_goal[0]
-        marker.pose.position.y = transformed_global_goal[1]
-        marker.pose.position.z = 1.5 # 프런티어와 같은 높이
-
-        marker.pose.orientation.w = 1.0
-
-        marker.scale.x = 0.6
-        marker.scale.y = 0.6
-        marker.scale.z = 0.6
-
-        # 눈에 띄는 시안(Cyan) 색상
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.8)
-
-        self.goal_projection_pub.publish(marker)
 
     def compute_cost_map(self, incl, coll, steep):
         """Frontier 탐색에 특화된 traversability map 생성 (적응적 임계값 사용)"""
@@ -810,36 +688,24 @@ class FrontierDetector:
             inclination_threshold = base_inclination_threshold
         elif total_tilt < 8.0:  # 약간 기울어진 지형 (3-8도)
             # 기울어진 상태: 갈 수 있는 영역 확대 (임계값 낮춤)
-            # collision_threshold = base_collision_threshold - 0.1
-            # steepness_threshold = base_steepness_threshold - 0.2  # 경사 임계값 낮춤
-            # inclination_threshold = base_inclination_threshold - 0.2  # 경사도 임계값 낮춤
-            collision_threshold = base_collision_threshold + 0.1 # 더 관대하게
-            steepness_threshold = base_steepness_threshold + 0.1 # 더 관대하게
-            inclination_threshold = base_inclination_threshold + 0.1 # 더 관대하게
+            collision_threshold = base_collision_threshold - 0.1
+            steepness_threshold = base_steepness_threshold - 0.2  # 경사 임계값 낮춤
+            inclination_threshold = base_inclination_threshold - 0.2  # 경사도 임계값 낮춤
         elif total_tilt < 15.0:  # 기울어진 지형 (8-15도)
             # 기울어진 상태: 갈 수 있는 영역 더 확대
-            # collision_threshold = base_collision_threshold - 0.2
-            # steepness_threshold = base_steepness_threshold - 0.4  # 경사 임계값 더 낮춤
-            # inclination_threshold = base_inclination_threshold - 0.4  # 경사도 임계값 더 낮춤
-            collision_threshold = base_collision_threshold + 0.2
-            steepness_threshold = base_steepness_threshold + 0.2
-            inclination_threshold = base_inclination_threshold + 0.2
+            collision_threshold = base_collision_threshold - 0.2
+            steepness_threshold = base_steepness_threshold - 0.4  # 경사 임계값 더 낮춤
+            inclination_threshold = base_inclination_threshold - 0.4  # 경사도 임계값 더 낮춤
         elif total_tilt < 25.0:  # 매우 기울어진 지형 (15-25도)
             # 기울어진 상태: 갈 수 있는 영역 매우 확대
-            # collision_threshold = base_collision_threshold - 0.3
-            # steepness_threshold = base_steepness_threshold - 0.6  # 경사 임계값 매우 낮춤
-            # inclination_threshold = base_inclination_threshold - 0.6  # 경사도 임계값 매우 낮춤
-            collision_threshold = base_collision_threshold + 0.3
-            steepness_threshold = base_steepness_threshold + 0.3
-            inclination_threshold = base_inclination_threshold + 0.3
+            collision_threshold = base_collision_threshold - 0.3
+            steepness_threshold = base_steepness_threshold - 0.6  # 경사 임계값 매우 낮춤
+            inclination_threshold = base_inclination_threshold - 0.6  # 경사도 임계값 매우 낮춤
         else:  # 극한 지형 (25도 이상)
             # 기울어진 상태: 갈 수 있는 영역 극한 확대
-            # collision_threshold = base_collision_threshold - 0.4
-            # steepness_threshold = base_steepness_threshold - 0.8  # 경사 임계값 극한 낮춤
-            # inclination_threshold = base_inclination_threshold - 0.8  # 경사도 임계값 극한 낮춤
-            collision_threshold = base_collision_threshold + 0.4
-            steepness_threshold = base_steepness_threshold + 0.4
-            inclination_threshold = base_inclination_threshold + 0.4
+            collision_threshold = base_collision_threshold - 0.4
+            steepness_threshold = base_steepness_threshold - 0.8  # 경사 임계값 극한 낮춤
+            inclination_threshold = base_inclination_threshold - 0.8  # 경사도 임계값 극한 낮춤
         
         # 임계값 범위 제한 (0.05 ~ 1.0) - 더 관대한 범위
         collision_threshold = max(0.05, min(1.0, collision_threshold))
@@ -1110,106 +976,120 @@ class FrontierDetector:
         """원래 find_frontiers 공식: 맵 yaw=0 가정, GridMap.pose가 맵 중심."""
         cx = self.span_center_x()
         cy = self.span_center_y()
-        # wx = cx - (ix - int(cols/2)) * self.resolution
-        # wy = cy - (iy - int(rows/2)) * self.resolution
-        wx = cx + (ix - int(cols/2)) * self.resolution # <--- 플러스로 변경
-        wy = cy + (iy - int(rows/2)) * self.resolution # <--- 플러스로 변경
+        wx = cx - (ix - int(cols/2)) * self.resolution
+        wy = cy - (iy - int(rows/2)) * self.resolution
         return wx, wy
 
     def _world_to_cell_no_rot(self, xw:float, yw:float, cols:int, rows:int):
         """원래 find_frontiers 역변환(중심 기준, x는 -, y도 -)"""
-        cx = self.span_center_x()
+        cx = self.span center_x()
         cy = self.span_center_y()
-        # ix = int(round( int(cols/2)  - (xw - cx) / self.resolution ))
-        # iy = int(round( int(rows/2)  - (yw - cy) / self.resolution ))
-        ix = int(round( int(cols/2)  + (xw - cx) / self.resolution )) # <--- 수정
-        iy = int(round( int(rows/2)  + (yw - cy) / self.resolution )) # <--- 수정
+        ix = int(round( int(cols/2)  - (xw - cx) / self.resolution ))
+        iy = int(round( int(rows/2)  - (yw - cy) / self.resolution ))
         return ix, iy
 
     def span_center_x(self):  # world center X of grid_map
-        return self.grid_map.info.pose.position.x or 0.0
+        return self.grid_map?.info?.pose?.position?.x or 0.0
     def span_center_y(self):
-        return self.grid_map.info.pose.position.y or 0.0
+        return self.grid_map?.info?.pose?.position?.y or 0.0
         
     def find_frontiers(self, traversability_map):
-        """원래 좌표계(yaw=0 가정) + 로봇 위치는 맵 중앙과 동일하다고 가정된 버전.
-        (terrain_local_gridmap 이면 보통 맵 중심이 로봇 위치입니다)"""
+        """Traversability map에서 프런티어 포인트 탐색 (원래 find_frontiers 좌표계 가정으로 통일: yaw=0)"""
         frontiers = []
 
-        rows, cols = traversability_map.shape
+        # --- 기본 통계 (로그용) ---
+        h, w = traversability_map.shape
+        total_nan     = int(np.isnan(traversability_map).sum())
+        total_safe    = int(np.sum(traversability_map == 0.0))
+        total_caution = int(np.sum(traversability_map == 0.5))
+        total_blocked = int(np.sum(traversability_map == 1.0))
+
+        # --- 맵 중심(world) & 셀 중심(원래 공식) ---
         cx = self.grid_map.info.pose.position.x
         cy = self.grid_map.info.pose.position.y
-        center_x = int(self.width  / (2.0 * self.resolution))   # 원래 코드와 동일하게
+        center_x = int(self.width  / (2.0 * self.resolution))   # ✅ 원래 주석 버전 그대로
         center_y = int(self.height / (2.0 * self.resolution))
 
-        # 레이 스캔 파라미터
-        angles = self.make_biased_angles()   # world==map 축 가정 (yaw=0)
-        # import ipdb; ipdb.set_trace()
-        print("angles:", angles)
+        # --- 로봇 위치를 "원래식"으로 셀 인덱스로 (yaw=0 가정) ---
+        # world_x = cx - (cell_x - center_x)*res  →  cell_x = center_x - (world_x - cx)/res
+        robot_cx = int(round(center_x - (self.odom_position_x - cx) / self.resolution))
+        robot_cy = int(round(center_y - (self.odom_position_y - cy) / self.resolution))
+
+        if not (0 <= robot_cx < w and 0 <= robot_cy < h):
+            rospy.logwarn(f"Robot index out of bounds (orig frame): rc=({robot_cx},{robot_cy}), w,h=({w},{h}), "
+                        f"mapC=({cx:.2f},{cy:.2f}), robot=({self.odom_position_x:.2f},{self.odom_position_y:.2f}), "
+                        f"center=({center_x},{center_y}), res={self.resolution:.3f}")
+            return []
+
+        # --- 각도/거리 스캔 파라미터 (✅ 초기화 누락 보완) ---
+        angles = self.make_biased_seeding() if hasattr(self, "make_biased_seeding") else self.make_biased_angles()
         max_dist_cells = max(1, int(self.SEARCH_RADIUS / self.resolution))
-        rays_checked = rays_hit_nan = rays_hit_blocked = 0
+        rays_checked = 0
+        rays_hit_nan = 0
+        rays_hit_blocked = 0
 
-        rospy.loginfo(f"[shape] rows={rows}, cols={cols}, center=({center_x},{center_y}), res={self.resolution:.3f}")
-
-        for ang in angles:
+        for angle in angles:
             rays_checked += 1
-            far_ix = far_iy = None
+            far = None
 
-            for dist in range(1, max_dist_cells+1):
-                ix = int(round(center_x + dist * math.cos(ang)))
-                iy = int(round(center_y + math.sin(ang) * dist))
+            # ✅ 원래식: 맵 중심에서 각도 더해가는 방식이었지만,
+            #    우리는 "로봇에서 쏘는" 현재 로직을 유지합니다.
+            for dist in range(1, max_dist_b := max_dist_cells):
+                x = int(round(robot_cx + dist * math.cos(angle)))
+                y = int(round(robot_cy + dist * math.sin(angle)))
 
-                if not (0 <= ix < cols and 0 <= iy < rows):
+                if not (0 <= x < w and 0 <= y < h):
                     break
 
-                v = float(traversability_map[iy, ix])
+                v = traversability_map[y, x]
                 if np.isnan(v):
                     rays_hit_nan += 1
                     break
-                if v >= 1.0:
+                elif v >= 1.0:
                     rays_hit_blocked += 1
                     break
-                if v <= 0.5 and self.is_safe_area(traversability_map, ix, iy):
-                    far_ix, far_iy = ix, iy
+                elif v <= 0.5 and self.is_safe_area(traversability_map, x, y):
+                    far = (x, y)
 
-            if far_ix is not None:
-                wx, wy = self._cell_to_world_no_rot(far_ix, far_iy, cols, rows)
+            if far is not None:
+                cell_x, cell_y = far
 
-                # 인셋(옵션)
-                if self.FRONTIER_INSET_M > 1e-6:
-                    vx, vy = (wx - self.odom_position_x), (wy - self.odom_position_y)
-                    d = math.hypot(vx, vy)
-                    if d > 1e-6:
-                        s = max(0.0, (d - self.FRONTIER_INSET_M) / d)
-                        wx = self.odom_position_x + vx * s
-                        wy = self.odom_position_y + vy * s
+                # --- 셀 → 월드 (✅ 원래식: yaw=0 가정, 중심 기준으로 뒤집기) ---
+                world_x = cx - (cell_x - center_x) * self.resolution
+                world_y = cy - (cell_y - center_y) * self.resolution
 
-                if math.hypot(wx - self.odom_position_x, wy - self.odom_position_y) > self.MIN_FRONTIER_DIST and \
-                self.check_min_distance(frontiers, (wx, wy)):
-                    frontiers.append((wx, wy))
+                # --- (옵션) 인셋: 경계에서 안전영역 안쪽으로 끌어오기 ---
+                if getattr(self, "FRONTIER_INSET_M", 0.0) > 1e-6:
+                    vx = world_x - self.odom_position_x
+                    vy = world_y - self.odom_position_y
+                    vd = math.hypot(vx, vy)
+                    if vd > 1e-6:
+                        scale = max(0.0, (vd - self.FRONTIER_INSET_M) / vd)
+                        world_x = self.odom_position_x + vx * scale
+                        world_y = self.odom_position_y + vy * scale
+
+                dist_from_robot = math.hypot(world_x - self.odom_position_x,
+                                            world_y - self.odom_position_y)
+                if (dist_from_robot > self.MIN_FRONTIER_DIST and
+                    self.check_min_distance(frontiers, (world_x, world_y))):
+                    frontiers.append((world_x, world_y))
 
         rospy.loginfo(f"Found {len(frontiers)} frontier candidates "
-                    f"(NaN={int(np.isnan(traversability_map).sum())}, "
-                    f"safe={int((traversability_map==0.0).sum())}, "
-                    f"blocked={int((traversability_map==1.0).sum())}, "
-                    f"rays={rays_checked}, hitNaN={rays_hit_nan}, hitBlk={rays_hit_blocked})")
+                    f"(NaN={total_nan}, safe={total_safe}, caution={total_caution}, "
+                    f"blocked={total_blocked}, rays={rays_checked}, nanHits={rays_hit_nan}, blkHits={rays_hit_blocked})")
 
         if not frontiers:
-            # 디버깅 팁 로그
-            rospy.logwarn("No frontiers found. Try: smaller SAFETY_RADIUS (e.g.,2), set USE_BOUNDARY_FRONTIER=False, "
-                        "reduce ANGLE_RESOLUTION to 0.2, verify GridMap length_x/length_y ≈ (cols*res)/(rows*res).")
-            return []
+            rospy.logwarn("No frontiers found — try smaller SAFETY_RADIUS or disable USE_BOUNDARY_FRONTIER, "
+                        "and verify grid_map shape/indices.")
 
-        # 억제 단계 (섹터+NMS+링)
-        rospy.loginfo(f"[frontier] before thin: {len(frontiers)}")
-        # frontiers = self.thin_frontiers(frontiers)
-        rospy.loginfo(f"[frontier] after  thin: {len(frontiers)}")
-        if getattr(self, "USE_RING_NMS", True):
-            frontiers = self.ring_nms(frontiers)
-        rospy.loginfo(f"[frontier] after  ring_nms: {len(frontiers)}")
+        else:
+            rospy.loginfo(f"[frontier] before thin: {len(frontiers)}")
+            frontiers = self.thin_frontiers(frontiers)
+            if getattr(self, "USE_RING_NMS", True):
+                frontiers = self.ring_nms(frontiers)
+            rospy.loginfo(f"[frontier] after  thin+ring: {len(frontiers)}")
 
         return frontiers
-
 
 
     def ring_nms(self, pts_world):
@@ -1271,53 +1151,24 @@ class FrontierDetector:
         
         return (local_goal_x, local_goal_y)
 
-    # def select_best_frontier(self, frontiers, transformed_global_goal):
-    #     if not frontiers:
-    #         return None
-
-    #     best_frontier = None
-    #     min_distance = float('inf')
-
-    #     for frontier in frontiers:
-    #         local_frontier = self.transform_world_to_local(frontier)
-
-    #         dist = math.sqrt((local_frontier[0] - transformed_global_goal[0])**2 + (local_frontier[1] - transformed_global_goal[1])**2)
-
-    #         if dist < min_distance:
-    #             min_distance = dist
-    #             best_frontier = frontier
-
-    #     return best_frontier
-
     def select_best_frontier(self, frontiers, transformed_global_goal):
-        """
-        [수정됨] 
-        frontiers: 'aligned_basis' 기준 프런티어 목록
-        transformed_global_goal: 'aligned_basis' 기준 글로벌 골 좌표
-        """
         if not frontiers:
             return None
 
         best_frontier = None
         min_distance = float('inf')
 
-        # 'transformed_global_goal'는 이미 로컬(aligned_basis) 좌표입니다.
-        goal_x = transformed_global_goal[0]
-        goal_y = transformed_global_goal[1]
-
         for frontier in frontiers:
-            # 'frontier' 또한 이미 로컬(aligned_basis) 좌표입니다.
-            # ★★★ 버그 수정: 불필요한 transform_world_to_local 호출 제거 ★★★
-            local_frontier = frontier 
-            
-            dist = math.sqrt((local_frontier[0] - goal_x)**2 + (local_frontier[1] - goal_y)**2)
+            local_frontier = self.transform_world_to_local(frontier)
+
+            dist = math.sqrt((local_frontier[0] - transformed_global_goal[0])**2 + (local_frontier[1] - transformed_global_goal[1])**2)
 
             if dist < min_distance:
                 min_distance = dist
                 best_frontier = frontier
 
         return best_frontier
-    
+
     def transform_world_to_local(self, world_point):
         dx = world_point[0] - self.odom_position_x
         dy = world_point[1] - self.odom_position_y
@@ -1483,7 +1334,7 @@ class FrontierDetector:
 
         # 글로벌 골 마커 생성
         goal_marker = Marker()
-        goal_marker.header.frame_id = "world"
+        goal_marker.header.frame_id = "aligned_basis"
         goal_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
         goal_marker.ns = "global_goal"
         goal_marker.id = 0

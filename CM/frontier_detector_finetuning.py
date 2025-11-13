@@ -301,53 +301,6 @@ class FrontierDetector:
         except Exception as e:
             rospy.logerr(f"Error processing grid map: {e}")
 
-<<<<<<< HEAD:frontier_detector_finetuning.py
-    def visualize_robot_yaw(self):
-        """로봇의 현재 Yaw (진행 방향)을 화살표로 시각화"""
-        
-        # 1. 화살표 길이 (적당히 2m로 고정)
-        arrow_length = 2.0 
-
-        # 2. 화살표 마커 생성
-        yaw_marker = Marker()
-        yaw_marker.header.frame_id = "world" # Odometry 기준이므로 'world' 프레임
-        yaw_marker.header.stamp = self.grid_map.info.header.stamp if self.grid_map else rospy.Time.now()
-        yaw_marker.ns = "robot_yaw"
-        yaw_marker.id = 0
-        yaw_marker.type = Marker.ARROW
-        yaw_marker.action = Marker.ADD
-        
-        # 3. 화살표 시작점 (로봇의 현재 위치)
-        start_point = Point()
-        start_point.x = self.odom_position_x
-        start_point.y = self.odom_position_y
-        start_point.z = 0.5  # 지면에서 0.5m 위 (global_goal_direction과 같은 높이)
-        
-        # 4. 화살표 끝점 (Yaw 방향으로 arrow_length 만큼)
-        end_point = Point()
-        end_point.x = self.odom_position_x + arrow_length * math.cos(self.odom_rotation_yaw)
-        end_point.y = self.odom_position_y + arrow_length * math.sin(self.odom_rotation_yaw)
-        end_point.z = 0.5
-        
-        yaw_marker.points = [start_point, end_point]
-        
-        # 5. 화살표 스타일 설정
-        yaw_marker.scale.x = 0.15  # 몸통 두께
-        yaw_marker.scale.y = 0.25  # 머리 두께
-        yaw_marker.scale.z = 0.0
-        
-        # 6. 색상: 마젠타 (Magenta) - 다른 시각화와 겹치지 않게
-        yaw_marker.color = ColorRGBA()
-        yaw_marker.color.r = 1.0
-        yaw_marker.color.g = 0.0
-        yaw_marker.color.b = 1.0
-        yaw_marker.color.a = 0.8
-        
-        # 7. 발행
-        self.yaw_viz_pub.publish(yaw_marker)
-
-||||||| 9eb7b45:frontier_detector_finetuning.py
-=======
     def visualize_robot_yaw(self):
         """로봇의 현재 Yaw (진행 방향)을 화살표로 시각화"""
 
@@ -392,7 +345,6 @@ class FrontierDetector:
         # 7. 발행
         self.yaw_viz_pub.publish(yaw_marker)
 
->>>>>>> 30d35e60:CM/frontier_detector_finetuning.py
     def odom_callback(self, msg):
         prev_yaw = self.odom_rotation_yaw
 

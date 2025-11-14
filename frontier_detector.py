@@ -12,13 +12,15 @@ import math
 from nav_msgs.msg import Odometry
 import tf.transformations
 from utils import (
-    transform_global_goal_to_local,
+    global_to_local,
     transform_local_to_world,
     visualize_goal_projection,
     visualize_frontiers,
     visualize_global_goal,
-    visualize_traversability_map
+    visualize_cost_map
 )
+
+import scipy.ndimage
 
 class FrontierDetector:
     def __init__(self):
@@ -27,7 +29,7 @@ class FrontierDetector:
         self.SEARCH_RADIUS = 15.0
         self.ANGLE_RESOLUTION = 0.2
         self.STEP_RESOLUTION = 0.25
-        self.COST_THRESHOLD = 0.1
+        self.COST_THRESHOLD = 0.7
         self.MIN_FRONTIER_DIST = 0.0
         self.SAFETY_RADIUS = 3
 
@@ -38,56 +40,21 @@ class FrontierDetector:
         self.odom_position_y = 0.0
         self.odom_rotation_yaw = 0.0
 
-        self.grid_map_sub = rospy.Subscriber(
-            '/trip/trip_updated/terrain_local_gridmap',
-            GridMap,
-            self.grid_map_callback
-        )
+        self.grid_map_sub = rospy.Subscriber('/trip/trip_updated/terrain_local_gridmap', GridMap, self.grid_map_callback)
+        self.odom_sub = rospy.Subscriber('/global/odometry', Odometry, self.odom_callback)
+        self.global_goal_sub = rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.global_goal_callback)
 
-        self.odom_sub = rospy.Subscriber(
-            '/global/odometry',
-            Odometry,
-            self.odom_callback
-        )
+        self.frontier_viz_pub = rospy.Publisher('/frontier_visualization', MarkerArray, queue_size=1)
+        self.global_goal_viz_pub = rospy.Publisher('/global_goal_visualization', MarkerArray, queue_size=1)
 
-        self.frontier_viz_pub = rospy.Publisher(
-            '/frontier_visualization',
-            MarkerArray,
-            queue_size=1
-        )
-
-        self.traversability_viz_pub = rospy.Publisher(
-            '/frontier_map',
-            GridMap,
-            queue_size=1
-        )
-
-        self.global_goal_viz_pub = rospy.Publisher(
-            '/global_goal_visualization',
-            MarkerArray,
-            queue_size=1
-        )
-
-        self.local_goal_pub = rospy.Publisher(
-            '/local_goal',
-            PoseStamped,
-            queue_size=1
-        )
-
-        self.global_goal_sub = rospy.Subscriber(
-            '/move_base_simple/goal',
-            PoseStamped,
-            self.global_goal_callback
-        )
+        self.local_goal_pub = rospy.Publisher('/local_goal', PoseStamped, queue_size=1)
         self.goal_projection_pub = rospy.Publisher('/goal_projection_visualization', Marker, queue_size=1, latch=True)
+        self.cost_map_viz_pub = rospy.Publisher('/frontier_map_visualization', GridMap, queue_size=1)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
         self.grid_map = None
-        self.last_traversability_map = None
-        self.last_frontiers = None
-        self.last_selected_frontier = None
         self.max_frontier_id = [-1]
 
         self.resolution = None
@@ -114,39 +81,29 @@ class FrontierDetector:
                 traversability_map = self.compute_cost_map(inclination_risk, collision_risk, steepness_risk)
 
                 if traversability_map is not None:
-                    self.last_traversability_map = traversability_map
-
-                    transformed_global_goal = transform_global_goal_to_local(
+                    transformed_global_goal = global_to_local(
                         self.global_goal_x, self.global_goal_y, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
                     )
-                    visualize_goal_projection(transformed_global_goal, self.grid_map.info, self.goal_projection_pub)
+                    ### frontier candidates ###
                     frontiers = self.find_frontiers(traversability_map)
 
                     if frontiers:
-                        transformed_global_goal = transform_global_goal_to_local(
-                            self.global_goal_x, self.global_goal_y, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
-                        )
-                        selected_frontier = self.select_best_frontier(frontiers, transformed_global_goal)
+                        local_goal = self.select_local_goal(frontiers, transformed_global_goal)
 
-                        if selected_frontier:
+                        if local_goal:
                             world_frontier = transform_local_to_world(
-                                selected_frontier, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
+                                local_goal, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
                             )
                             self.publish_local_goal(world_frontier)
 
                         rospy.loginfo(f"GridMap Update - Found {len(frontiers)} frontiers")
-                        visualize_traversability_map(traversability_map, self.grid_map, self.traversability_viz_pub)
-                        visualize_frontiers(frontiers, selected_frontier, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
+                        visualize_frontiers(frontiers, local_goal, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
                         visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
-
-                        self.last_frontiers = frontiers
-                        self.last_selected_frontier = selected_frontier
+                        visualize_goal_projection(transformed_global_goal, self.grid_map.info, self.goal_projection_pub)
+                        visualize_cost_map(traversability_map, self.grid_map.info, self.cost_map_viz_pub)
                     else:
-                        visualize_traversability_map(traversability_map, self.grid_map, self.traversability_viz_pub)
                         visualize_frontiers([], None, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
                         visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
-                        self.last_frontiers = None
-                        self.last_selected_frontier = None
                 else:
                     rospy.logwarn("Cost map computation failed")
             else:
@@ -196,11 +153,11 @@ class FrontierDetector:
             rospy.set_param('/global_goal_x', self.global_goal_x)
             rospy.set_param('/global_goal_y', self.global_goal_y)
 
-            rospy.loginfo(f"✅ [SUCCESS] New global goal set in {target_frame}: "
+            rospy.loginfo(f"New global goal set in {target_frame}: "
                           f"({self.global_goal_x:.2f}, {self.global_goal_y:.2f})")
 
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-            rospy.logerr(f"❌ [FAIL] Failed to transform global goal from {source_frame} to {target_frame}: {e}")
+            rospy.logerr(f"Failed to transform global goal from {source_frame} to {target_frame}: {e}")
             rospy.logwarn("Global goal was NOT updated. Check TF tree (is 'world' frame available?).")
 
     def get_layer_data(self, layer_name):
@@ -228,12 +185,13 @@ class FrontierDetector:
         if incl is None or coll is None or steep is None:
             return None
 
-        collision_threshold = 0.8
-        steepness_threshold = 0.7
-        inclination_threshold = 0.7
-
         traversability_map = np.full_like(incl, np.nan)
 
+        center_x = int(self.width / (2 * self.resolution))
+        center_y = int(self.height / (2 * self.resolution))
+
+        # Step 1: Compute initial risk cost
+        initial_cost_map = np.full_like(incl, np.nan)
         for i in range(incl.shape[0]):
             for j in range(incl.shape[1]):
                 incl_val = incl[i, j]
@@ -241,28 +199,103 @@ class FrontierDetector:
                 steep_val = steep[i, j]
 
                 if np.isnan(incl_val) or np.isnan(coll_val) or np.isnan(steep_val):
-                    traversability_map[i, j] = np.nan
+                    risk_cost = np.nan
                 else:
-                    if coll_val > collision_threshold:
-                        traversability_map[i, j] = 1.0
-                    elif steep_val > steepness_threshold or incl_val > inclination_threshold:
-                        traversability_map[i, j] = 1.0
-                    elif (coll_val > collision_threshold * 0.5 or
-                          steep_val > steepness_threshold * 0.5 or
-                          incl_val > inclination_threshold * 0.5):
-                        traversability_map[i, j] = 0.5
+                    # Aggressive level 1: Max
+                    # Aggressive level 2: Top 2 average
+                    # Aggressive level 3: Average
+                    aggressive_level = 3
+
+                    risks = sorted([incl_val, coll_val, steep_val], reverse=True)
+                    if aggressive_level == 1:
+                        risk_cost = risks[0]
+                    elif aggressive_level == 2:
+                        risk_cost = (risks[0] + risks[1]) / 2.0
                     else:
-                        traversability_map[i, j] = 0.0
+                        risk_cost = (risks[0] + risks[1] + risks[2]) / 3.0
+                initial_cost_map[i, j] = risk_cost
 
-        safe_cells = np.sum(traversability_map == 0.0)
-        caution_cells = np.sum(traversability_map == 0.5)
-        blocked_cells = np.sum(traversability_map == 1.0)
-        unknown_cells = np.sum(np.isnan(traversability_map))
+        # Step 2: Process Cost Map
+        robot_radius = self.SAFETY_RADIUS * self.resolution
+        geometric_cost_threshold = self.COST_THRESHOLD
+        geometric_dilation_alpha = 1.4
+        geometric_gaussian_sigma = 0.5
+        geometric_cost_amplification = 1.2
 
-        rospy.loginfo(f"Traversability Map - Safe: {safe_cells}, Caution: {caution_cells}, "
-                     f"Blocked: {blocked_cells}, Unknown: {unknown_cells}")
-        rospy.loginfo(f"Fixed thresholds: collision={collision_threshold:.2f}, "
-                     f"steepness={steepness_threshold:.2f}, inclination={inclination_threshold:.2f}")
+        # 2.1. Binarize based on threshold
+        binary_image = np.zeros_like(initial_cost_map, dtype=np.uint8)
+        binary_image[initial_cost_map >= geometric_cost_threshold] = 255
+
+        # 2.2. Median Blur for denoising
+        denoised_image = scipy.ndimage.median_filter(binary_image, size=3)
+
+        # 2.3. Hole Filling
+        hole_filled = scipy.ndimage.binary_fill_holes(denoised_image).astype(np.uint8) * 255
+
+        # 2.4. Dilation
+        dilation_radius_cells = int(round(robot_radius * geometric_dilation_alpha / self.resolution))
+        if dilation_radius_cells > 0:
+            y, x = np.ogrid[-dilation_radius_cells:dilation_radius_cells+1, -dilation_radius_cells:dilation_radius_cells+1]
+            structuring_element = (x**2 + y**2 <= dilation_radius_cells**2).astype(np.uint8)
+            dilated_image = scipy.ndimage.binary_dilation(hole_filled, structure=structuring_element).astype(np.uint8) * 255
+        else:
+            dilated_image = hole_filled.copy()
+
+        dilated_mask = (dilated_image == 255)
+        processed_cost_map = initial_cost_map.copy()
+        processed_cost_map[dilated_mask] = 1.0
+
+        # 2.5. Gaussian Blur
+        gaussian_sigma_pixels = robot_radius * geometric_gaussian_sigma / self.resolution
+        if gaussian_sigma_pixels < 1.0:
+            gaussian_sigma_pixels = 1.0
+
+        gaussian_image = scipy.ndimage.gaussian_filter(processed_cost_map, sigma=gaussian_sigma_pixels, mode='nearest')
+        gaussian_image[dilated_mask] = 1.0
+
+        # Step 3: Generate Final Cost Map
+        final_cost_map = gaussian_image.copy()
+
+        temp_min_cost = np.nanmax(final_cost_map)
+        temp_max_cost = np.nanmin(final_cost_map)
+
+        for i in range(final_cost_map.shape[0]):
+            for j in range(final_cost_map.shape[1]):
+                if not np.isnan(initial_cost_map[i, j]):
+                    cost_val = final_cost_map[i, j]
+                    if initial_cost_map[i, j] >= geometric_cost_threshold:
+                        cost_val = 1.0
+                    else:
+                        cost_val *= geometric_cost_amplification
+
+                    if cost_val > 1.0:
+                        cost_val = 1.0
+
+                    current_cell_dist_from_center = np.sqrt(((j - center_x) * self.resolution)**2 + ((i - center_y) * self.resolution)**2)
+                    if current_cell_dist_from_center <= robot_radius:
+                        cost_val = 0.0
+
+                    final_cost_map[i, j] = cost_val
+                    if not np.isnan(cost_val):
+                        temp_min_cost = min(temp_min_cost, cost_val)
+                        temp_max_cost = max(temp_max_cost, cost_val)
+
+        min_cost = temp_min_cost
+        max_cost = temp_max_cost
+
+        # Min-Max Normalization
+        cost_range = max_cost - min_cost
+        if cost_range > 0 and not np.isinf(cost_range):
+            normalized_cost_map = (final_cost_map - min_cost) / cost_range
+
+            for i in range(normalized_cost_map.shape[0]):
+                for j in range(normalized_cost_map.shape[1]):
+                    current_cell_dist_from_center = np.sqrt(((j - center_x) * self.resolution)**2 + ((i - center_y) * self.resolution)**2)
+                    if current_cell_dist_from_center <= robot_radius:
+                        normalized_cost_map[i, j] = 0.0
+            traversability_map = normalized_cost_map
+        else:
+            traversability_map = final_cost_map
 
         return traversability_map
 
@@ -297,12 +330,11 @@ class FrontierDetector:
                 if np.isnan(current_value):
                     rays_hit_nan += 1
                     break
-                elif current_value >= 1.0:
+                elif current_value >= self.COST_THRESHOLD: # Changed from 1.0 to self.COST_THRESHOLD (e.g., 0.7)
                     rays_hit_blocked += 1
                     break
-                elif current_value <= 0.5:
-                    if self.is_safe_area(traversability_map, x, y):
-                        farthest_traversable_point = (x, y)
+                elif current_value < self.COST_THRESHOLD: # Changed from <= 0.5 to < self.COST_THRESHOLD
+                    farthest_traversable_point = (x, y)
 
             if farthest_traversable_point is not None:
                 cell_x, cell_y = farthest_traversable_point
@@ -332,11 +364,11 @@ class FrontierDetector:
 
         return frontiers
 
-    def select_best_frontier(self, frontiers, transformed_global_goal):
+    def select_local_goal(self, frontiers, transformed_global_goal):
         if not frontiers:
             return None
 
-        best_frontier = None
+        local_goal = None
         min_distance = float('inf')
 
         goal_x = transformed_global_goal[0]
@@ -349,9 +381,9 @@ class FrontierDetector:
 
             if dist < min_distance:
                 min_distance = dist
-                best_frontier = frontier
+                local_goal = frontier
 
-        return best_frontier
+        return local_goal
 
     def publish_local_goal(self, world_frontier):
         if world_frontier is None:
@@ -377,30 +409,6 @@ class FrontierDetector:
 
         self.local_goal_pub.publish(local_goal_msg)
 
-    def is_safe_area(self, traversability_map, x, y):
-        height, width = traversability_map.shape
-
-        safe_cells = 0
-        total_cells = 0
-
-        for dx in range(-self.SAFETY_RADIUS, self.SAFETY_RADIUS + 1):
-            for dy in range(-self.SAFETY_RADIUS, self.SAFETY_RADIUS + 1):
-                check_x = x + dx
-                check_y = y + dy
-
-                if 0 <= check_x < width and 0 <= check_y < height:
-                    total_cells += 1
-                    cell_value = traversability_map[check_y, check_x]
-
-                    if not np.isnan(cell_value) and cell_value <= 0.5:
-                        safe_cells += 1
-
-        if total_cells > 0:
-            safety_ratio = safe_cells / total_cells
-            return safety_ratio >= 0.7
-
-        return False
-
     def check_min_distance(self, frontiers, new_point):
         for frontier in frontiers:
             dist = np.sqrt((frontier[0] - new_point[0])**2 + (frontier[1] - new_point[1])**2)
@@ -414,4 +422,3 @@ if __name__ == '__main__':
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
-

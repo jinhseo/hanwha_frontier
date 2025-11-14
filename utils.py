@@ -8,7 +8,7 @@ import math
 import tf.transformations
 from std_msgs.msg import MultiArrayDimension, MultiArrayLayout, Float32MultiArray
 
-def transform_global_goal_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw):
+def global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw):
     dx = global_goal_x - odom_position_x
     dy = global_goal_y - odom_position_y
 
@@ -114,7 +114,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
     frontier_viz_pub.publish(marker_array)
 
 def visualize_global_goal(global_goal_x, global_goal_y, grid_map_info, global_goal_viz_pub, odom_position_x, odom_position_y, odom_rotation_yaw):
-    transformed_goal = transform_global_goal_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw)
+    transformed_goal = global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw)
 
     goal_marker = Marker()
     goal_marker.header.frame_id = "world"
@@ -143,17 +143,17 @@ def visualize_global_goal(global_goal_x, global_goal_y, grid_map_info, global_go
     marker_array.markers.append(goal_marker)
     global_goal_viz_pub.publish(marker_array)
 
-def visualize_traversability_map(traversability_map, grid_map, traversability_viz_pub):
-    frontier_map = GridMap()
 
-    frontier_map.info = grid_map.info
-    frontier_map.layers = ['traversability']
+def visualize_cost_map(traversability_map, grid_map_info, cost_map_viz_pub):
+    # Create a new GridMap message
+    cost_map_msg = GridMap()
 
-    inverted_map = np.copy(traversability_map)
-    valid_mask = ~np.isnan(traversability_map)
-    inverted_map[valid_mask] = 1.0 - traversability_map[valid_mask]
+    # Copy info from the original grid_map_info
+    cost_map_msg.info = grid_map_info
+    cost_map_msg.layers = ['cost_map'] # Define a layer name for the cost map
 
-    traversability_data_msg = Float32MultiArray()
+    # Flatten the traversability_map and convert to Float32MultiArray
+    cost_data_msg = Float32MultiArray()
 
     dim1 = MultiArrayDimension()
     dim1.label = "column_index"
@@ -165,18 +165,16 @@ def visualize_traversability_map(traversability_map, grid_map, traversability_vi
     dim2.size = traversability_map.shape[1]
     dim2.stride = traversability_map.shape[1]
 
-    traversability_data_msg.layout.dim = [dim1, dim2]
-    traversability_data_msg.layout.data_offset = 0
+    cost_data_msg.layout.dim = [dim1, dim2]
+    cost_data_msg.layout.data_offset = 0
 
-    traversability_data_msg.data = inverted_map.flatten().tolist()
+    # Replace NaN values with a specific float (e.g., -1.0) if GridMap visualization handles it better
+    # Or, rely on Rviz GridMap plugin to handle NaNs if it does.
+    # For now, let's keep NaNs as is, but be aware it might need adjustment if Rviz has issues.
+    cost_data_msg.data = traversability_map.flatten().tolist()
 
-    frontier_map.data = [traversability_data_msg]
+    cost_map_msg.data = [cost_data_msg]
 
-    traversability_viz_pub.publish(frontier_map)
-
-    original_stamp = grid_map.info.header.stamp
-    published_stamp = frontier_map.info.header.stamp
-    time_diff = abs((original_stamp - published_stamp).to_sec()) if original_stamp != published_stamp else 0.0
-
-    if time_diff > 0.001:
-        rospy.logwarn(f"Timestamp sync issue: {time_diff:.3f}s difference")
+    # Publish the GridMap message
+    cost_map_viz_pub.publish(cost_map_msg)
+    rospy.loginfo("Cost map visualization published as GridMap message.")

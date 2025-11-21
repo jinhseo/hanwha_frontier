@@ -12,11 +12,6 @@ def global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position
     dx = global_goal_x - odom_position_x
     dy = global_goal_y - odom_position_y
 
-    rospy.loginfo(f"Global goal: ({global_goal_x}, {global_goal_y})")
-    rospy.loginfo(f"Robot position: ({odom_position_x}, {odom_position_y})")
-    rospy.loginfo(f"Delta: ({dx}, {dy})")
-    rospy.loginfo(f"Robot yaw: {odom_rotation_yaw}")
-
     cos_yaw = math.cos(-odom_rotation_yaw)
     sin_yaw = math.sin(-odom_rotation_yaw)
 
@@ -41,7 +36,7 @@ def visualize_goal_projection(transformed_global_goal, grid_map_info, goal_proje
         return
 
     marker = Marker()
-    marker.header.frame_id = "aligned_basis"
+    marker.header.frame_id = "aligned_base"
     marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
     marker.ns = "goal_projection"
     marker.id = 0
@@ -67,7 +62,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
 
     for i in range(max_frontier_id_ref[0] + 1):
         delete_marker = Marker()
-        delete_marker.header.frame_id = "aligned_basis"
+        delete_marker.header.frame_id = "aligned_base"
         delete_marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
         delete_marker.ns = "frontiers"
         delete_marker.id = i
@@ -82,7 +77,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
 
     for i, (x, y) in enumerate(frontiers):
         marker = Marker()
-        marker.header.frame_id = "aligned_basis"
+        marker.header.frame_id = "aligned_base"
         marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
         marker.ns = "frontiers"
         marker.id = i
@@ -145,14 +140,11 @@ def visualize_global_goal(global_goal_x, global_goal_y, grid_map_info, global_go
 
 
 def visualize_cost_map(traversability_map, grid_map_info, cost_map_viz_pub):
-    # Create a new GridMap message
     cost_map_msg = GridMap()
 
-    # Copy info from the original grid_map_info
     cost_map_msg.info = grid_map_info
-    cost_map_msg.layers = ['cost_map'] # Define a layer name for the cost map
+    cost_map_msg.layers = ['cost_map']
 
-    # Flatten the traversability_map and convert to Float32MultiArray
     cost_data_msg = Float32MultiArray()
 
     dim1 = MultiArrayDimension()
@@ -168,13 +160,9 @@ def visualize_cost_map(traversability_map, grid_map_info, cost_map_viz_pub):
     cost_data_msg.layout.dim = [dim1, dim2]
     cost_data_msg.layout.data_offset = 0
 
-    # Replace NaN values with a specific float (e.g., -1.0) if GridMap visualization handles it better
-    # Or, rely on Rviz GridMap plugin to handle NaNs if it does.
-    # For now, let's keep NaNs as is, but be aware it might need adjustment if Rviz has issues.
     cost_data_msg.data = traversability_map.flatten().tolist()
 
     cost_map_msg.data = [cost_data_msg]
 
     # Publish the GridMap message
     cost_map_viz_pub.publish(cost_map_msg)
-    rospy.loginfo("Cost map visualization published as GridMap message.")

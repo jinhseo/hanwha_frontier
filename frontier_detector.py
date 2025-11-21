@@ -27,7 +27,7 @@ class FrontierDetector:
         rospy.init_node('frontier_detector', anonymous=True)
 
         self.SEARCH_RADIUS = 15.0
-        self.ANGLE_RESOLUTION = 0.2
+        self.ANGLE_RESOLUTION = 0.3
         self.STEP_RESOLUTION = 0.25
         self.COST_THRESHOLD = 0.7
         self.MIN_FRONTIER_DIST = 0.0
@@ -85,10 +85,10 @@ class FrontierDetector:
                         self.global_goal_x, self.global_goal_y, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
                     )
                     ### frontier candidates ###
-                    frontiers = self.find_frontiers(traversability_map)
+                    frontiers = self.find_frontiers(traversability_map, transformed_global_goal)
 
                     if frontiers:
-                        local_goal = self.select_local_goal(frontiers, transformed_global_goal)
+                        local_goal = self.select_local_goal(frontiers, transformed_global_goal, self.odom_rotation_yaw)
 
                         if local_goal:
                             world_frontier = transform_local_to_world(
@@ -126,12 +126,13 @@ class FrontierDetector:
         pitch_deg = math.degrees(pitch)
         yaw_deg = math.degrees(yaw)
         total_tilt = max(abs(roll_deg), abs(pitch_deg))
+        self.total_robot_tilt = total_tilt
 
         rospy.loginfo(f"Robot orientation: roll={roll_deg:.1f}°, pitch={pitch_deg:.1f}°, yaw={yaw_deg:.1f}°")
         rospy.loginfo(f"Robot tilt: total={total_tilt:.1f}°")
 
     def global_goal_callback(self, msg):
-        target_frame = "world"
+        target_frame = "aligned_base"
         source_frame = msg.header.frame_id
 
         rospy.loginfo(f"Attempting to set new goal from RViz. (Source: {source_frame})")
@@ -204,6 +205,18 @@ class FrontierDetector:
                     # Aggressive level 1: Max
                     # Aggressive level 2: Top 2 average
                     # Aggressive level 3: Average
+
+                    # Dynamic aggressive level based on robot tilt
+                    if hasattr(self, 'total_robot_tilt'):
+                        if self.total_robot_tilt <= 10.0:
+                            aggressive_level = 1  # More aggressive (max risk)
+                        elif 10.0 < self.total_robot_tilt <= 15.0:
+                            aggressive_level = 2  # Moderate (top 2 average)
+                        else:
+                            aggressive_level = 3  # Less aggressive (average risk)
+                    else:
+                        aggressive_level = 1 # Default to aggressive if tilt not available
+
                     aggressive_level = 3
 
                     risks = sorted([incl_val, coll_val, steep_val], reverse=True)
@@ -219,7 +232,7 @@ class FrontierDetector:
         robot_radius = self.SAFETY_RADIUS * self.resolution
         geometric_cost_threshold = self.COST_THRESHOLD
         geometric_dilation_alpha = 1.4
-        geometric_gaussian_sigma = 0.5
+        geometric_gaussian_sigma = 0.3
         geometric_cost_amplification = 1.2
 
         # 2.1. Binarize based on threshold
@@ -299,7 +312,7 @@ class FrontierDetector:
 
         return traversability_map
 
-    def find_frontiers(self, traversability_map):
+    def find_frontiers(self, traversability_map, transformed_global_goal):
         frontiers = []
         center_x = int(self.width / (2 * self.resolution))
         center_y = int(self.height / (2 * self.resolution))
@@ -313,7 +326,25 @@ class FrontierDetector:
         rays_hit_nan = 0
         rays_hit_blocked = 0
 
-        for angle in np.arange(0, 2*np.pi, self.ANGLE_RESOLUTION):
+        # Calculate the angle to the global goal
+        raw_goal_angle = math.atan2(transformed_global_goal[1], transformed_global_goal[0])
+        goal_angle = (raw_goal_angle + np.pi + 2 * np.pi) % (2 * np.pi)
+
+        DENSE_ANGLE_RANGE = math.pi / 6
+        DENSE_ANGLE_RESOLUTION = 0.05
+
+        # Iterate through angles
+        angles_to_check = []
+        angle = 0.0
+        while angle < 2 * np.pi:
+            if goal_angle - DENSE_ANGLE_RANGE <= angle <= goal_angle + DENSE_ANGLE_RANGE:
+                angles_to_check.append(angle)
+                angle += DENSE_ANGLE_RESOLUTION
+            else:
+                angles_to_check.append(angle)
+                angle += self.ANGLE_RESOLUTION
+
+        for angle in angles_to_check:
             rays_checked += 1
             max_dist_cells = int(self.SEARCH_RADIUS / self.resolution)
             farthest_traversable_point = None
@@ -330,10 +361,10 @@ class FrontierDetector:
                 if np.isnan(current_value):
                     rays_hit_nan += 1
                     break
-                elif current_value >= self.COST_THRESHOLD: # Changed from 1.0 to self.COST_THRESHOLD (e.g., 0.7)
+                elif current_value >= self.COST_THRESHOLD:
                     rays_hit_blocked += 1
                     break
-                elif current_value < self.COST_THRESHOLD: # Changed from <= 0.5 to < self.COST_THRESHOLD
+                elif current_value < self.COST_THRESHOLD:
                     farthest_traversable_point = (x, y)
 
             if farthest_traversable_point is not None:
@@ -364,12 +395,12 @@ class FrontierDetector:
 
         return frontiers
 
-    def select_local_goal(self, frontiers, transformed_global_goal):
+    def select_local_goal(self, frontiers, transformed_global_goal, current_yaw):
         if not frontiers:
             return None
 
         local_goal = None
-        min_distance = float('inf')
+        best_score = float('inf')
 
         goal_x = transformed_global_goal[0]
         goal_y = transformed_global_goal[1]
@@ -377,10 +408,27 @@ class FrontierDetector:
         for frontier in frontiers:
             local_frontier = frontier
 
-            dist = math.sqrt((local_frontier[0] - goal_x)**2 + (local_frontier[1] - goal_y)**2)
+            dist_to_global_goal = math.sqrt((local_frontier[0] - goal_x)**2 + (local_frontier[1] - goal_y)**2)
 
-            if dist < min_distance:
-                min_distance = dist
+            normalized_dist_score = min(dist_to_global_goal / self.SEARCH_RADIUS, 1.0)
+
+            angle_to_frontier = math.atan2(local_frontier[1], local_frontier[0])
+
+            normalized_current_yaw = math.atan2(math.sin(current_yaw), math.cos(current_yaw))
+            normalized_angle_to_frontier = math.atan2(math.sin(angle_to_frontier), math.cos(angle_to_frontier))
+
+            angle_diff = abs(normalized_current_yaw - normalized_angle_to_frontier)
+
+            if angle_diff > np.pi:
+                angle_diff = 2 * np.pi - angle_diff
+
+            normalized_angle_score = angle_diff / np.pi
+            WEIGHT_DISTANCE = 1.0
+            WEIGHT_ANGLE = 0.0
+
+            current_score = (WEIGHT_DISTANCE * normalized_dist_score) + (WEIGHT_ANGLE * normalized_angle_score * self.SEARCH_RADIUS)
+            if current_score < best_score:
+                best_score = current_score
                 local_goal = frontier
 
         return local_goal
@@ -391,7 +439,7 @@ class FrontierDetector:
 
         local_goal_msg = PoseStamped()
         local_goal_msg.header.stamp = rospy.Time.now()
-        local_goal_msg.header.frame_id = "aligned_basis"
+        local_goal_msg.header.frame_id = "aligned_base"
 
         local_goal_msg.pose.position.x = world_frontier[0]
         local_goal_msg.pose.position.y = world_frontier[1]

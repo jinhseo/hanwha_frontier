@@ -7,41 +7,58 @@ from std_msgs.msg import ColorRGBA
 import math
 import tf.transformations
 from std_msgs.msg import MultiArrayDimension, MultiArrayLayout, Float32MultiArray
+import tf2_ros
+import tf2_geometry_msgs
 
-def global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw):
-    dx = global_goal_x - odom_position_x
-    dy = global_goal_y - odom_position_y
+# def global_to_local_manual(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw):
+#     dx = global_goal_x - odom_position_x
+#     dy = global_goal_y - odom_position_y
+#
+#     rospy.loginfo(f"Global goal: ({global_goal_x}, {global_goal_y})")
+#     rospy.loginfo(f"Robot position: ({odom_position_x}, {odom_position_y})")
+#     rospy.loginfo(f"Delta: ({dx}, {dy})")
+#     rospy.loginfo(f"Robot yaw: {odom_rotation_yaw}")
+#
+#     cos_yaw = math.cos(-odom_rotation_yaw)
+#     sin_yaw = math.sin(-odom_rotation_yaw)
+#
+#     local_goal_x = dx * cos_yaw - dy * sin_yaw
+#     local_goal_y = dx * sin_yaw + dy * cos_yaw
+#
+#     rospy.loginfo(f"Transformed goal: ({local_goal_x:.2f}, {local_goal_y:.2f})")
+#
+#     return (local_goal_x, local_goal_y)
 
-    rospy.loginfo(f"Global goal: ({global_goal_x}, {global_goal_y})")
-    rospy.loginfo(f"Robot position: ({odom_position_x}, {odom_position_y})")
-    rospy.loginfo(f"Delta: ({dx}, {dy})")
-    rospy.loginfo(f"Robot yaw: {odom_rotation_yaw}")
+def global_to_local(tf_buffer, global_goal_x, global_goal_y, source_frame, target_frame="aligned_base"):
+    goal_pose = PoseStamped()
+    goal_pose.header.frame_id = source_frame
+    goal_pose.header.stamp = rospy.Time(0)
+    goal_pose.pose.position.x = global_goal_x
+    goal_pose.pose.position.y = global_goal_y
+    goal_pose.pose.position.z = 0.0
+    goal_pose.pose.orientation.w = 1.0
 
-    cos_yaw = math.cos(-odom_rotation_yaw)
-    sin_yaw = math.sin(-odom_rotation_yaw)
+    try:
+        transformed_pose = tf_buffer.transform(
+            goal_pose,
+            target_frame,
+            rospy.Duration(1.0)
+        )
+        local_goal_x = transformed_pose.pose.position.x
+        local_goal_y = transformed_pose.pose.position.y
+        rospy.loginfo(f"Transformed goal from {source_frame} to {target_frame}: ({local_goal_x:.2f}, {local_goal_y:.2f})")
+        return (local_goal_x, local_goal_y)
 
-    local_goal_x = dx * cos_yaw - dy * sin_yaw
-    local_goal_y = dx * sin_yaw + dy * cos_yaw
-
-    rospy.loginfo(f"Transformed goal: ({local_goal_x:.2f}, {local_goal_y:.2f})")
-
-    return (local_goal_x, local_goal_y)
-
-def transform_local_to_world(local_point, odom_position_x, odom_position_y, odom_rotation_yaw):
-    cos_yaw = math.cos(-odom_rotation_yaw)
-    sin_yaw = math.sin(-odom_rotation_yaw)
-
-    world_x = odom_position_x + (local_point[0] * cos_yaw - local_point[1] * sin_yaw)
-    world_y = odom_position_y + (local_point[0] * sin_yaw + local_point[1] * cos_yaw)
-
-    return (world_x, world_y)
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+        rospy.logerr(f"Failed to transform global goal from {source_frame} to {target_frame}: {e}")
+        return None
 
 def visualize_goal_projection(transformed_global_goal, grid_map_info, goal_projection_pub):
     if transformed_global_goal is None:
         return
 
     marker = Marker()
-    marker.header.frame_id = "aligned_basis"
+    marker.header.frame_id = "aligned_base"
     marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
     marker.ns = "goal_projection"
     marker.id = 0
@@ -67,7 +84,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
 
     for i in range(max_frontier_id_ref[0] + 1):
         delete_marker = Marker()
-        delete_marker.header.frame_id = "aligned_basis"
+        delete_marker.header.frame_id = "aligned_base"
         delete_marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
         delete_marker.ns = "frontiers"
         delete_marker.id = i
@@ -82,7 +99,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
 
     for i, (x, y) in enumerate(frontiers):
         marker = Marker()
-        marker.header.frame_id = "aligned_basis"
+        marker.header.frame_id = "aligned_base"
         marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
         marker.ns = "frontiers"
         marker.id = i
@@ -114,7 +131,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
     frontier_viz_pub.publish(marker_array)
 
 def visualize_global_goal(global_goal_x, global_goal_y, grid_map_info, global_goal_viz_pub, odom_position_x, odom_position_y, odom_rotation_yaw):
-    transformed_goal = global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw)
+    # transformed_goal = global_to_local(global_goal_x, global_goal_y, odom_position_x, odom_position_y, odom_rotation_yaw) # 제거
 
     goal_marker = Marker()
     goal_marker.header.frame_id = "world"

@@ -13,7 +13,6 @@ from nav_msgs.msg import Odometry
 import tf.transformations
 from utils import (
     global_to_local,
-    transform_local_to_world,
     visualize_goal_projection,
     visualize_frontiers,
     visualize_global_goal,
@@ -33,16 +32,17 @@ class FrontierDetector:
         self.MIN_FRONTIER_DIST = 0.0
         self.SAFETY_RADIUS = 3
 
-        self.global_goal_x = rospy.get_param('/global_goal_x', 200.0)
+        self.global_goal_x = rospy.get_param('/global_goal_x', 0.0)
         self.global_goal_y = rospy.get_param('/global_goal_y', 0.0)
 
         self.odom_position_x = 0.0
         self.odom_position_y = 0.0
         self.odom_rotation_yaw = 0.0
 
-        self.grid_map_sub = rospy.Subscriber('/trip/trip_updated/terrain_local_gridmap', GridMap, self.grid_map_callback)
-        self.odom_sub = rospy.Subscriber('/global/odometry', Odometry, self.odom_callback)
-        self.global_goal_sub = rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.global_goal_callback)
+        self.grid_map_sub = rospy.Subscriber('/trip/trip_updated/terrain_local_gridmap', GridMap, self.grid_map_callback) ### aligned_base
+        self.odom_sub = rospy.Subscriber('/global/odometry', Odometry, self.odom_callback)                                ### world -> base
+        #self.odom_sub = rospy.Subscriber('/odometry_gt', Odometry, self.odom_callback)
+        self.global_goal_sub = rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.global_goal_callback)         ### aligned_base
 
         self.frontier_viz_pub = rospy.Publisher('/frontier_visualization', MarkerArray, queue_size=1)
         self.global_goal_viz_pub = rospy.Publisher('/global_goal_visualization', MarkerArray, queue_size=1)
@@ -60,8 +60,6 @@ class FrontierDetector:
         self.resolution = None
         self.width = None
         self.height = None
-        self.origin_x = None
-        self.origin_y = None
 
     def grid_map_callback(self, msg):
         try:
@@ -69,9 +67,6 @@ class FrontierDetector:
             self.resolution = msg.info.resolution
             self.width = msg.info.length_x
             self.height = msg.info.length_y
-
-            self.origin_x = msg.info.pose.position.x - self.width/2
-            self.origin_y = msg.info.pose.position.y - self.height/2
 
             inclination_risk = self.get_layer_data('inclination_risk')
             collision_risk = self.get_layer_data('collision_risk')
@@ -82,7 +77,7 @@ class FrontierDetector:
 
                 if traversability_map is not None:
                     transformed_global_goal = global_to_local(
-                        self.global_goal_x, self.global_goal_y, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
+                        self.tf_buffer, self.global_goal_x, self.global_goal_y, "world", "aligned_base"
                     )
                     ### frontier candidates ###
                     frontiers = self.find_frontiers(traversability_map)
@@ -91,10 +86,7 @@ class FrontierDetector:
                         local_goal = self.select_local_goal(frontiers, transformed_global_goal)
 
                         if local_goal:
-                            world_frontier = transform_local_to_world(
-                                local_goal, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
-                            )
-                            self.publish_local_goal(world_frontier)
+                            self.publish_local_goal(local_goal)
 
                         rospy.loginfo(f"GridMap Update - Found {len(frontiers)} frontiers")
                         visualize_frontiers(frontiers, local_goal, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
@@ -338,16 +330,21 @@ class FrontierDetector:
 
             if farthest_traversable_point is not None:
                 cell_x, cell_y = farthest_traversable_point
-                world_x = self.grid_map.info.pose.position.x - (cell_x - center_x) * self.resolution
-                world_y = self.grid_map.info.pose.position.y - (cell_y - center_y) * self.resolution
 
-                dist_from_robot = np.sqrt(world_x**2 + world_y**2)
+                #local_frontier_x = self.grid_map.info.pose.position.x - (cell_x - center_x) * self.resolution
+                #local_frontier_y = self.grid_map.info.pose.position.y - (cell_y - center_y) * self.resolution
+
+                # right-left flip
+                local_frontier_x = - (cell_x - center_x) * self.resolution
+                local_frontier_y = - (cell_y - center_y) * self.resolution
+
+                dist_from_robot = np.sqrt(local_frontier_x**2 + local_frontier_y**2)
 
                 traversability_value = traversability_map[cell_y, cell_x]
 
                 if (dist_from_robot > self.MIN_FRONTIER_DIST and
-                    self.check_min_distance(frontiers, (world_x, world_y))):
-                    frontiers.append((world_x, world_y))
+                    self.check_min_distance(frontiers, (local_frontier_x, local_frontier_y))):
+                    frontiers.append((local_frontier_x, local_frontier_y))
 
         rospy.loginfo(f"Found {len(frontiers)} frontier candidates")
 
@@ -391,7 +388,7 @@ class FrontierDetector:
 
         local_goal_msg = PoseStamped()
         local_goal_msg.header.stamp = rospy.Time.now()
-        local_goal_msg.header.frame_id = "aligned_basis"
+        local_goal_msg.header.frame_id = "aligned_base"
 
         local_goal_msg.pose.position.x = world_frontier[0]
         local_goal_msg.pose.position.y = world_frontier[1]

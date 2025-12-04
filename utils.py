@@ -46,11 +46,33 @@ def global_to_local(tf_buffer, global_goal_x, global_goal_y, source_frame, targe
         )
         local_goal_x = transformed_pose.pose.position.x
         local_goal_y = transformed_pose.pose.position.y
-        rospy.loginfo(f"Transformed goal from {source_frame} to {target_frame}: ({local_goal_x:.2f}, {local_goal_y:.2f})")
         return (local_goal_x, local_goal_y)
 
     except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
         rospy.logerr(f"Failed to transform global goal from {source_frame} to {target_frame}: {e}")
+        return None
+
+def local_to_global(tf_buffer, local_x, local_y, source_frame="aligned_base", target_frame="world"):
+    local_pose = PoseStamped()
+    local_pose.header.frame_id = source_frame
+    local_pose.header.stamp = rospy.Time(0) # Use 0 for latest available transform
+    local_pose.pose.position.x = local_x
+    local_pose.pose.position.y = local_y
+    local_pose.pose.position.z = 0.0
+    local_pose.pose.orientation.w = 1.0
+
+    try:
+        transformed_pose = tf_buffer.transform(
+            local_pose,
+            target_frame,
+            rospy.Duration(1.0) # Timeout for transform
+        )
+        global_x = transformed_pose.pose.position.x
+        global_y = transformed_pose.pose.position.y
+        return (global_x, global_y)
+
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+        rospy.logerr(f"Failed to transform local goal from {source_frame} to {target_frame}: {e}")
         return None
 
 def visualize_goal_projection(transformed_global_goal, grid_map_info, goal_projection_pub):
@@ -194,4 +216,3 @@ def visualize_cost_map(traversability_map, grid_map_info, cost_map_viz_pub):
 
     # Publish the GridMap message
     cost_map_viz_pub.publish(cost_map_msg)
-    rospy.loginfo("Cost map visualization published as GridMap message.")

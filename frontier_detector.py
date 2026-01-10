@@ -11,45 +11,61 @@ from geometry_msgs.msg import PoseStamped
 import math
 from nav_msgs.msg import Odometry
 import tf.transformations
+from std_msgs.msg import Int32
 from utils import (
     global_to_local,
-    transform_local_to_world,
     visualize_goal_projection,
     visualize_frontiers,
     visualize_global_goal,
-    visualize_cost_map
+    local_to_global
 )
-
-import scipy.ndimage
 
 class FrontierDetector:
     def __init__(self):
         rospy.init_node('frontier_detector', anonymous=True)
 
-        self.SEARCH_RADIUS = 15.0
-        self.ANGLE_RESOLUTION = 0.3
+        self.SEARCH_RADIUS = 9 ### 15
+        self.ANGLE_RESOLUTION = 0.2
         self.STEP_RESOLUTION = 0.25
         self.COST_THRESHOLD = 0.7
-        self.MIN_FRONTIER_DIST = 0.0
         self.SAFETY_RADIUS = 3
 
-        self.global_goal_x = rospy.get_param('/global_goal_x', 200.0)
-        self.global_goal_y = rospy.get_param('/global_goal_y', 0.0)
+        # --- Mode Management --- #
+        self.SEARCH_MODE = 0
+        self.RECOVERY_MODE = 1
+        self.EXPLORATION_MODE = 2
+        self.current_mode = self.SEARCH_MODE
+        self.current_mode_pub = rospy.Publisher('/frontier_detector/current_mode', Int32, queue_size=1) # Added mode publisher
+        self.current_mode_pub.publish(self.current_mode) # Publish initial mode
+
+        # Dead End Detection Parameters
+        self.local_goal_history = []
+        self.LOCAL_GOAL_HISTORY_SIZE = 10  # Number of local goals to track
+        self.LOCAL_GOAL_STAGNATION_THRESHOLD = 0.1 # meters, if local goals don't change much
+
+        self.odom_history = []
+        self.ODOM_HISTORY_SIZE = 50 # Number of odom positions to track
+        self.ROBOT_STAGNATION_THRESHOLD = 0.3 # meters, if robot doesn't move much
+
+        self.latest_local_goal = None
+
+        self.global_goal_x = rospy.get_param('/global_goal_x', 0.0) ### ('/target_goal_x', -499.948609927)
+        self.global_goal_y = rospy.get_param('/global_goal_y', 0.0) ### ('/target_goal_y', 124.862913548)
 
         self.odom_position_x = 0.0
         self.odom_position_y = 0.0
         self.odom_rotation_yaw = 0.0
 
-        self.grid_map_sub = rospy.Subscriber('/trip/trip_updated/terrain_local_gridmap', GridMap, self.grid_map_callback)
-        self.odom_sub = rospy.Subscriber('/global/odometry', Odometry, self.odom_callback)
-        self.global_goal_sub = rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.global_goal_callback)
+        self.grid_map_sub = rospy.Subscriber('/GridMap_planning', GridMap, self.grid_map_callback) ### aligned_base
+        self.odom_sub = rospy.Subscriber('/global/odometry', Odometry, self.odom_callback)                                ### world -> base
+        #self.odom_sub = rospy.Subscriber('/odometry_gt', Odometry, self.odom_callback)
+        self.global_goal_sub = rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.global_goal_callback)         ### aligned_base
 
         self.frontier_viz_pub = rospy.Publisher('/frontier_visualization', MarkerArray, queue_size=1)
         self.global_goal_viz_pub = rospy.Publisher('/global_goal_visualization', MarkerArray, queue_size=1)
 
         self.local_goal_pub = rospy.Publisher('/local_goal', PoseStamped, queue_size=1)
         self.goal_projection_pub = rospy.Publisher('/goal_projection_visualization', Marker, queue_size=1, latch=True)
-        self.cost_map_viz_pub = rospy.Publisher('/frontier_map_visualization', GridMap, queue_size=1)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
@@ -60,8 +76,6 @@ class FrontierDetector:
         self.resolution = None
         self.width = None
         self.height = None
-        self.origin_x = None
-        self.origin_y = None
 
     def grid_map_callback(self, msg):
         try:
@@ -70,49 +84,60 @@ class FrontierDetector:
             self.width = msg.info.length_x
             self.height = msg.info.length_y
 
-            self.origin_x = msg.info.pose.position.x - self.width/2
-            self.origin_y = msg.info.pose.position.y - self.height/2
+            traversability_map = self.get_layer_data('planning_cost_map_updated')
 
-            inclination_risk = self.get_layer_data('inclination_risk')
-            collision_risk = self.get_layer_data('collision_risk')
-            steepness_risk = self.get_layer_data('steepness_risk')
+            transformed_global_goal = global_to_local(self.tf_buffer, self.global_goal_x, self.global_goal_y, "world", "aligned_base")
 
-            if inclination_risk is not None and collision_risk is not None and steepness_risk is not None:
-                traversability_map = self.compute_cost_map(inclination_risk, collision_risk, steepness_risk)
+            ### frontier candidates ###
+            frontiers = self.find_frontiers(traversability_map, transformed_global_goal)
 
-                if traversability_map is not None:
-                    transformed_global_goal = global_to_local(
-                        self.global_goal_x, self.global_goal_y, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
+            if frontiers:
+                local_goal = self.select_local_goal(frontiers, transformed_global_goal)
+
+                if local_goal:
+                    self.publish_local_goal(local_goal)
+
+                    # Update local goal history
+                    self.local_goal_history.append(local_goal)
+                    if len(self.local_goal_history) > self.LOCAL_GOAL_HISTORY_SIZE:
+                        self.local_goal_history.pop(0)
+
+                    # Update latest local goal
+                    self.latest_local_goal = local_goal
+
+                    # Convert local_goal to global frame and set as ROS parameters
+                    global_goal_from_local = local_to_global(
+                        self.tf_buffer, local_goal[0], local_goal[1], "aligned_base", "world"
                     )
-                    ### frontier candidates ###
-                    frontiers = self.find_frontiers(traversability_map, transformed_global_goal)
-
-                    if frontiers:
-                        local_goal = self.select_local_goal(frontiers, transformed_global_goal, self.odom_rotation_yaw)
-
-                        if local_goal:
-                            world_frontier = transform_local_to_world(
-                                local_goal, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw
-                            )
-                            self.publish_local_goal(world_frontier)
-
-                        rospy.loginfo(f"GridMap Update - Found {len(frontiers)} frontiers")
-                        visualize_frontiers(frontiers, local_goal, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
-                        visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
-                        visualize_goal_projection(transformed_global_goal, self.grid_map.info, self.goal_projection_pub)
-                        visualize_cost_map(traversability_map, self.grid_map.info, self.cost_map_viz_pub)
+                    if global_goal_from_local:
+                        rospy.set_param('/global_goal_x', global_goal_from_local[0])
+                        rospy.set_param('/global_goal_y', global_goal_from_local[1])
+                        rospy.loginfo(f"Set ROS param /global_goal_x: {global_goal_from_local[0]:.2f}, /global_goal_y: {global_goal_from_local[1]:.2f}")
                     else:
-                        visualize_frontiers([], None, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
-                        visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
-                else:
-                    rospy.logwarn("Cost map computation failed")
+                        rospy.logwarn("Failed to convert local_goal to global frame.")
+
+                viz_start_time = rospy.Time.now()
+                rospy.loginfo(f"GridMap Update - Found {len(frontiers)} frontiers")
+                visualize_frontiers(frontiers, local_goal, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
+                visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
+                visualize_goal_projection(transformed_global_goal, self.grid_map.info, self.goal_projection_pub)
             else:
-                rospy.logerr("Failed to get risk layer data")
+                viz_start_time = rospy.Time.now()
+                visualize_frontiers([], None, self.grid_map.info, self.frontier_viz_pub, self.max_frontier_id)
+                visualize_global_goal(self.global_goal_x, self.global_goal_y, self.grid_map.info, self.global_goal_viz_pub, self.odom_position_x, self.odom_position_y, self.odom_rotation_yaw)
+                # Check for no frontiers, and mode transition
+                if self.current_mode == self.SEARCH_MODE and not frontiers:
+                    rospy.logwarn("No frontiers found. Switching to RECOVERY_MODE.")
+                    self.current_mode = self.RECOVERY_MODE
+                    self.current_mode_pub.publish(self.current_mode) # Publish mode change
 
         except Exception as e:
             rospy.logerr(f"Error processing grid map: {e}")
 
     def odom_callback(self, msg):
+        #self.global_goal_x = rospy.get_param('/target_goal_x', 0.0) ### ('/target_goal_x', -499.948609927)
+        #self.global_goal_y = rospy.get_param('/target_goal_y', 0.0) ### ('/target_goal_y', 124.862913548)
+
         self.odom_position_x = msg.pose.pose.position.x
         self.odom_position_y = msg.pose.pose.position.y
 
@@ -122,17 +147,35 @@ class FrontierDetector:
 
         self.odom_rotation_yaw = yaw
 
+        # Update odom history for stagnation detection
+        self.odom_history.append((self.odom_position_x, self.odom_position_y))
+        if len(self.odom_history) > self.ODOM_HISTORY_SIZE:
+            self.odom_history.pop(0)
+
+        # Check for robot stagnation and mode transition (combined with local goal stagnation)
+        if (self.current_mode == self.SEARCH_MODE and
+            self._is_robot_stagnated() and
+            self._is_local_goal_stagnated(self.latest_local_goal)):
+            rospy.logwarn("Robot and local goal detected to be stagnated. Switching to RECOVERY_MODE.")
+            self.current_mode = self.RECOVERY_MODE
+            self.current_mode_pub.publish(self.current_mode) # Publish mode change
+
+        # Log robot movement and stagnation status
+        total_movement = 0.0
+        if len(self.odom_history) > 1:
+            for i in range(1, len(self.odom_history)):
+                p1 = self.odom_history[i-1]
+                p2 = self.odom_history[i]
+                total_movement += np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+        rospy.loginfo(f"[DeadEnd Debug] Robot Total Movement ({len(self.odom_history)} points): {total_movement:.3f}m, Stagnated: {self._is_robot_stagnated()}")
+
         roll_deg = math.degrees(roll)
         pitch_deg = math.degrees(pitch)
         yaw_deg = math.degrees(yaw)
         total_tilt = max(abs(roll_deg), abs(pitch_deg))
-        self.total_robot_tilt = total_tilt
-
-        rospy.loginfo(f"Robot orientation: roll={roll_deg:.1f}°, pitch={pitch_deg:.1f}°, yaw={yaw_deg:.1f}°")
-        rospy.loginfo(f"Robot tilt: total={total_tilt:.1f}°")
 
     def global_goal_callback(self, msg):
-        target_frame = "aligned_base"
+        target_frame = "world"
         source_frame = msg.header.frame_id
 
         rospy.loginfo(f"Attempting to set new goal from RViz. (Source: {source_frame})")
@@ -182,136 +225,6 @@ class FrontierDetector:
             rospy.logerr(f"Error getting layer data for {layer_name}: {e}")
             return None
 
-    def compute_cost_map(self, incl, coll, steep):
-        if incl is None or coll is None or steep is None:
-            return None
-
-        traversability_map = np.full_like(incl, np.nan)
-
-        center_x = int(self.width / (2 * self.resolution))
-        center_y = int(self.height / (2 * self.resolution))
-
-        # Step 1: Compute initial risk cost
-        initial_cost_map = np.full_like(incl, np.nan)
-        for i in range(incl.shape[0]):
-            for j in range(incl.shape[1]):
-                incl_val = incl[i, j]
-                coll_val = coll[i, j]
-                steep_val = steep[i, j]
-
-                if np.isnan(incl_val) or np.isnan(coll_val) or np.isnan(steep_val):
-                    risk_cost = np.nan
-                else:
-                    # Aggressive level 1: Max
-                    # Aggressive level 2: Top 2 average
-                    # Aggressive level 3: Average
-
-                    # Dynamic aggressive level based on robot tilt
-                    if hasattr(self, 'total_robot_tilt'):
-                        if self.total_robot_tilt <= 10.0:
-                            aggressive_level = 1  # More aggressive (max risk)
-                        elif 10.0 < self.total_robot_tilt <= 15.0:
-                            aggressive_level = 2  # Moderate (top 2 average)
-                        else:
-                            aggressive_level = 3  # Less aggressive (average risk)
-                    else:
-                        aggressive_level = 1 # Default to aggressive if tilt not available
-
-                    aggressive_level = 3
-
-                    risks = sorted([incl_val, coll_val, steep_val], reverse=True)
-                    if aggressive_level == 1:
-                        risk_cost = risks[0]
-                    elif aggressive_level == 2:
-                        risk_cost = (risks[0] + risks[1]) / 2.0
-                    else:
-                        risk_cost = (risks[0] + risks[1] + risks[2]) / 3.0
-                initial_cost_map[i, j] = risk_cost
-
-        # Step 2: Process Cost Map
-        robot_radius = self.SAFETY_RADIUS * self.resolution
-        geometric_cost_threshold = self.COST_THRESHOLD
-        geometric_dilation_alpha = 1.4
-        geometric_gaussian_sigma = 0.3
-        geometric_cost_amplification = 1.2
-
-        # 2.1. Binarize based on threshold
-        binary_image = np.zeros_like(initial_cost_map, dtype=np.uint8)
-        binary_image[initial_cost_map >= geometric_cost_threshold] = 255
-
-        # 2.2. Median Blur for denoising
-        denoised_image = scipy.ndimage.median_filter(binary_image, size=3)
-
-        # 2.3. Hole Filling
-        hole_filled = scipy.ndimage.binary_fill_holes(denoised_image).astype(np.uint8) * 255
-
-        # 2.4. Dilation
-        dilation_radius_cells = int(round(robot_radius * geometric_dilation_alpha / self.resolution))
-        if dilation_radius_cells > 0:
-            y, x = np.ogrid[-dilation_radius_cells:dilation_radius_cells+1, -dilation_radius_cells:dilation_radius_cells+1]
-            structuring_element = (x**2 + y**2 <= dilation_radius_cells**2).astype(np.uint8)
-            dilated_image = scipy.ndimage.binary_dilation(hole_filled, structure=structuring_element).astype(np.uint8) * 255
-        else:
-            dilated_image = hole_filled.copy()
-
-        dilated_mask = (dilated_image == 255)
-        processed_cost_map = initial_cost_map.copy()
-        processed_cost_map[dilated_mask] = 1.0
-
-        # 2.5. Gaussian Blur
-        gaussian_sigma_pixels = robot_radius * geometric_gaussian_sigma / self.resolution
-        if gaussian_sigma_pixels < 1.0:
-            gaussian_sigma_pixels = 1.0
-
-        gaussian_image = scipy.ndimage.gaussian_filter(processed_cost_map, sigma=gaussian_sigma_pixels, mode='nearest')
-        gaussian_image[dilated_mask] = 1.0
-
-        # Step 3: Generate Final Cost Map
-        final_cost_map = gaussian_image.copy()
-
-        temp_min_cost = np.nanmax(final_cost_map)
-        temp_max_cost = np.nanmin(final_cost_map)
-
-        for i in range(final_cost_map.shape[0]):
-            for j in range(final_cost_map.shape[1]):
-                if not np.isnan(initial_cost_map[i, j]):
-                    cost_val = final_cost_map[i, j]
-                    if initial_cost_map[i, j] >= geometric_cost_threshold:
-                        cost_val = 1.0
-                    else:
-                        cost_val *= geometric_cost_amplification
-
-                    if cost_val > 1.0:
-                        cost_val = 1.0
-
-                    current_cell_dist_from_center = np.sqrt(((j - center_x) * self.resolution)**2 + ((i - center_y) * self.resolution)**2)
-                    if current_cell_dist_from_center <= robot_radius:
-                        cost_val = 0.0
-
-                    final_cost_map[i, j] = cost_val
-                    if not np.isnan(cost_val):
-                        temp_min_cost = min(temp_min_cost, cost_val)
-                        temp_max_cost = max(temp_max_cost, cost_val)
-
-        min_cost = temp_min_cost
-        max_cost = temp_max_cost
-
-        # Min-Max Normalization
-        cost_range = max_cost - min_cost
-        if cost_range > 0 and not np.isinf(cost_range):
-            normalized_cost_map = (final_cost_map - min_cost) / cost_range
-
-            for i in range(normalized_cost_map.shape[0]):
-                for j in range(normalized_cost_map.shape[1]):
-                    current_cell_dist_from_center = np.sqrt(((j - center_x) * self.resolution)**2 + ((i - center_y) * self.resolution)**2)
-                    if current_cell_dist_from_center <= robot_radius:
-                        normalized_cost_map[i, j] = 0.0
-            traversability_map = normalized_cost_map
-        else:
-            traversability_map = final_cost_map
-
-        return traversability_map
-
     def find_frontiers(self, traversability_map, transformed_global_goal):
         frontiers = []
         center_x = int(self.width / (2 * self.resolution))
@@ -326,25 +239,43 @@ class FrontierDetector:
         rays_hit_nan = 0
         rays_hit_blocked = 0
 
-        # Calculate the angle to the global goal
-        raw_goal_angle = math.atan2(transformed_global_goal[1], transformed_global_goal[0])
-        goal_angle = (raw_goal_angle + np.pi + 2 * np.pi) % (2 * np.pi)
+        # --- Debugging Start ---
+        rospy.loginfo(f"[Dense Ray Debug] Transformed Global Goal: ({transformed_global_goal[0]:.2f}, {transformed_global_goal[1]:.2f})")
+        # rospy.loginfo(f"[Dense Ray Debug] Flipped Goal Vector for Angle: ({goal_vector_x:.2f}, {goal_vector_y:.2f})") # No longer applicable with direct atan2 call
+        # --- Debugging End ---
 
-        DENSE_ANGLE_RANGE = math.pi / 6
-        DENSE_ANGLE_RESOLUTION = 0.05
+        # Corrected atan2 call with x-axis flip applied to the x-component for consistency
+        global_goal_angle = math.atan2(-transformed_global_goal[1], -transformed_global_goal[0])
+        rospy.loginfo(f"[Dense Ray Debug] Global Goal Angle (degrees): {math.degrees(global_goal_angle):.2f}")
 
-        # Iterate through angles
+        # Generate angles
         angles_to_check = []
-        angle = 0.0
-        while angle < 2 * np.pi:
-            if goal_angle - DENSE_ANGLE_RANGE <= angle <= goal_angle + DENSE_ANGLE_RANGE:
-                angles_to_check.append(angle)
-                angle += DENSE_ANGLE_RESOLUTION
-            else:
-                angles_to_check.append(angle)
-                angle += self.ANGLE_RESOLUTION
 
-        for angle in angles_to_check:
+        # Denser angles around the global goal direction
+        denser_angle_range = np.pi / 6.0 # +- 45 degrees around global goal (can be tuned)
+        denser_angle_resolution = self.ANGLE_RESOLUTION / 6.0 # 3 times denser (can be tuned)
+
+        # Sparse angles for other directions
+        sparse_angle_resolution_factor = 3.0 # Make it 2 times sparser than normal (can be tuned)
+        sparse_angle_resolution = self.ANGLE_RESOLUTION * sparse_angle_resolution_factor
+
+        # Iterate through 360 degrees
+        current_angle = 0.0
+        while current_angle < 2 * np.pi:
+            angle_diff = np.abs(self._normalize_angle(current_angle - global_goal_angle))
+
+            if angle_diff <= denser_angle_range:
+                angles_to_check.append(current_angle)
+                current_angle += denser_angle_resolution
+            else:
+                # Add angle with sparser resolution
+                angles_to_check.append(current_angle)
+                current_angle += sparse_angle_resolution
+
+        # Ensure all angles are unique and sorted
+        all_angles = np.unique(np.array(angles_to_check))
+
+        for angle in all_angles: # Iterate over the combined set of angles
             rays_checked += 1
             max_dist_cells = int(self.SEARCH_RADIUS / self.resolution)
             farthest_traversable_point = None
@@ -369,16 +300,20 @@ class FrontierDetector:
 
             if farthest_traversable_point is not None:
                 cell_x, cell_y = farthest_traversable_point
-                world_x = self.grid_map.info.pose.position.x - (cell_x - center_x) * self.resolution
-                world_y = self.grid_map.info.pose.position.y - (cell_y - center_y) * self.resolution
 
-                dist_from_robot = np.sqrt(world_x**2 + world_y**2)
+                #local_frontier_x = self.grid_map.info.pose.position.x - (cell_x - center_x) * self.resolution
+                #local_frontier_y = self.grid_map.info.pose.position.y - (cell_y - center_y) * self.resolution
+
+                # right-left flip
+                local_frontier_x = - (cell_x - center_x) * self.resolution
+                local_frontier_y = - (cell_y - center_y) * self.resolution
+
+                dist_from_robot = np.sqrt(local_frontier_x**2 + local_frontier_y**2)
 
                 traversability_value = traversability_map[cell_y, cell_x]
 
-                if (dist_from_robot > self.MIN_FRONTIER_DIST and
-                    self.check_min_distance(frontiers, (world_x, world_y))):
-                    frontiers.append((world_x, world_y))
+                if (dist_from_robot > self.SAFETY_RADIUS): # Removed check_min_distance call
+                    frontiers.append((local_frontier_x, local_frontier_y, dist_from_robot))
 
         rospy.loginfo(f"Found {len(frontiers)} frontier candidates")
 
@@ -395,43 +330,98 @@ class FrontierDetector:
 
         return frontiers
 
-    def select_local_goal(self, frontiers, transformed_global_goal, current_yaw):
+    def _normalize_angle(self, angle):
+        """Normalize angle to be within [-pi, pi)"""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    def select_local_goal(self, frontiers, transformed_global_goal):
         if not frontiers:
             return None
-
-        local_goal = None
-        best_score = float('inf')
 
         goal_x = transformed_global_goal[0]
         goal_y = transformed_global_goal[1]
 
-        for frontier in frontiers:
-            local_frontier = frontier
+        robot_heading_vector = np.array([math.cos(self.odom_rotation_yaw), math.sin(self.odom_rotation_yaw)])
 
-            dist_to_global_goal = math.sqrt((local_frontier[0] - goal_x)**2 + (local_frontier[1] - goal_y)**2)
+        # Calculate distances for all frontiers
+        frontier_data = []
+        for fx, fy, f_dist_from_robot in frontiers:
+            dist_to_goal = math.sqrt((fx - goal_x)**2 + (fy - goal_y)**2)
 
-            normalized_dist_score = min(dist_to_global_goal / self.SEARCH_RADIUS, 1.0)
+            # robot to frontier vector
+            vector_to_frontier = np.array([fx, fy])
 
-            angle_to_frontier = math.atan2(local_frontier[1], local_frontier[0])
+            # Normalize vector_to_frontier (if not zero)
+            norm_vector_to_frontier = np.linalg.norm(vector_to_frontier)
+            if norm_vector_to_frontier > 0:
+                normalized_vector_to_frontier = vector_to_frontier / norm_vector_to_frontier
+            else:
+                normalized_vector_to_frontier = np.array([0.0, 0.0])
 
-            normalized_current_yaw = math.atan2(math.sin(current_yaw), math.cos(current_yaw))
-            normalized_angle_to_frontier = math.atan2(math.sin(angle_to_frontier), math.cos(angle_to_frontier))
+            dot_product = np.dot(robot_heading_vector, normalized_vector_to_frontier)
+            angle_score = np.clip(dot_product, -1.0, 1.0)
 
-            angle_diff = abs(normalized_current_yaw - normalized_angle_to_frontier)
+            frontier_data.append((fx, fy, f_dist_from_robot, dist_to_goal, angle_score))
 
-            if angle_diff > np.pi:
-                angle_diff = 2 * np.pi - angle_diff
+        if not frontier_data:
+            return None
 
-            normalized_angle_score = angle_diff / np.pi
-            WEIGHT_DISTANCE = 1.0
-            WEIGHT_ANGLE = 0.0
+        # Extract distances for normalization
+        goal_distances = [data[3] for data in frontier_data]
+        search_distances = [data[2] for data in frontier_data]
+        angle_scores = [data[4] for data in frontier_data]
 
-            current_score = (WEIGHT_DISTANCE * normalized_dist_score) + (WEIGHT_ANGLE * normalized_angle_score * self.SEARCH_RADIUS)
-            if current_score < best_score:
-                best_score = current_score
-                local_goal = frontier
+        # Convert to numpy arrays for vectorized operations
+        goal_distances_np = np.array(goal_distances)
+        search_distances_np = np.array(search_distances)
+        # angle_costs_np = np.array(angle_costs) # No longer needed for min-max normalization
 
-        return local_goal
+        min_goal_dist = np.min(goal_distances_np)
+        max_goal_dist = np.max(goal_distances_np)
+        # min_search_dist = np.min(search_distances_np) # No longer needed for normalization range
+        # max_search_dist = np.max(search_distances_np) # No longer needed for normalization range
+
+        # Normalize goal distances (smaller is better)
+        if (max_goal_dist - min_goal_dist) > 0:
+            normalized_goal_distances = (goal_distances_np - min_goal_dist) / (max_goal_dist - min_goal_dist)
+        else:
+            normalized_goal_distances = np.zeros_like(goal_distances_np)
+
+        # Normalize search distances (larger is better, using fixed radius for min/max)
+        # Assuming search_distances are in meters
+        min_search_range = self.SAFETY_RADIUS * self.resolution # The absolute minimum traversable distance from robot
+        max_search_range = self.SEARCH_RADIUS # The absolute maximum search radius
+
+        if (max_search_range - min_search_range) > 0:
+            clamped_search_distances = np.clip(search_distances_np, min_search_range, max_search_range)
+            normalized_search_distances = (clamped_search_distances - min_search_range) / (max_search_range - min_search_range)
+        else:
+            normalized_search_distances = np.zeros_like(search_distances_np)
+
+        weight_goal_dist = 0.3
+        weight_search_dist = 0.7
+        weight_angle_score = 0.0
+        #print("weight_goal_dist: ", weight_goal_dist)
+        #print("weight_search_dist: ", weight_search_dist)
+        print("normalized_goal_distances: ", normalized_goal_distances)
+        print(len(normalized_goal_distances))
+        print("normalized_search_distances: ", normalized_search_distances)
+        print(len(normalized_search_distances))
+        print("angle_scores: ", angle_scores)
+        print(len(angle_scores))
+        best_score = float('inf')
+        best_local_goal = None
+
+        for i, (fx, fy, _, _, _) in enumerate(frontier_data):
+            score = (weight_goal_dist * normalized_goal_distances[i]) \
+                  - (weight_search_dist * normalized_search_distances[i]) \
+                  - (weight_angle_score * angle_scores[i])
+
+            if score < best_score:
+                best_score = score
+                best_local_goal = (fx, fy)
+
+        return best_local_goal
 
     def publish_local_goal(self, world_frontier):
         if world_frontier is None:
@@ -457,12 +447,31 @@ class FrontierDetector:
 
         self.local_goal_pub.publish(local_goal_msg)
 
-    def check_min_distance(self, frontiers, new_point):
-        for frontier in frontiers:
-            dist = np.sqrt((frontier[0] - new_point[0])**2 + (frontier[1] - new_point[1])**2)
-            if dist < self.MIN_FRONTIER_DIST:
-                return False
-        return True
+    def _is_local_goal_stagnated(self, new_local_goal):
+        if len(self.local_goal_history) < self.LOCAL_GOAL_HISTORY_SIZE:
+            return False
+
+        # Calculate distance between current local goal and all historical local goals
+        stagnated = True
+        for old_goal in self.local_goal_history:
+            dist = np.sqrt((old_goal[0] - new_local_goal[0])**2 + (old_goal[1] - new_local_goal[1])**2)
+            if dist > self.LOCAL_GOAL_STAGNATION_THRESHOLD:
+                stagnated = False
+                break
+        return stagnated
+
+    def _is_robot_stagnated(self):
+        if len(self.odom_history) < self.ODOM_HISTORY_SIZE:
+            return False
+
+        # Calculate total movement over the history
+        total_movement = 0.0
+        for i in range(1, len(self.odom_history)):
+            p1 = self.odom_history[i-1]
+            p2 = self.odom_history[i]
+            total_movement += np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+        return total_movement < self.ROBOT_STAGNATION_THRESHOLD
 
 if __name__ == '__main__':
     try:

@@ -119,7 +119,7 @@ def visualize_frontiers(frontiers, selected_frontier, grid_map_info, frontier_vi
         frontier_viz_pub.publish(marker_array)
         return
 
-    for i, (x, y) in enumerate(frontiers):
+    for i, (x, y, _) in enumerate(frontiers):
         marker = Marker()
         marker.header.frame_id = "aligned_base"
         marker.header.stamp = grid_map_info.header.stamp if grid_map_info else rospy.Time.now()
@@ -181,38 +181,3 @@ def visualize_global_goal(global_goal_x, global_goal_y, grid_map_info, global_go
     marker_array = MarkerArray()
     marker_array.markers.append(goal_marker)
     global_goal_viz_pub.publish(marker_array)
-
-
-def visualize_cost_map(traversability_map, grid_map_info, cost_map_viz_pub):
-    # Create a new GridMap message
-    cost_map_msg = GridMap()
-
-    # Copy info from the original grid_map_info
-    cost_map_msg.info = grid_map_info
-    cost_map_msg.layers = ['cost_map'] # Define a layer name for the cost map
-
-    # Flatten the traversability_map and convert to Float32MultiArray
-    cost_data_msg = Float32MultiArray()
-
-    dim1 = MultiArrayDimension()
-    dim1.label = "column_index"
-    dim1.size = traversability_map.shape[0]
-    dim1.stride = traversability_map.size
-
-    dim2 = MultiArrayDimension()
-    dim2.label = "row_index"
-    dim2.size = traversability_map.shape[1]
-    dim2.stride = traversability_map.shape[1]
-
-    cost_data_msg.layout.dim = [dim1, dim2]
-    cost_data_msg.layout.data_offset = 0
-
-    # Replace NaN values with a specific float (e.g., -1.0) if GridMap visualization handles it better
-    # Or, rely on Rviz GridMap plugin to handle NaNs if it does.
-    # For now, let's keep NaNs as is, but be aware it might need adjustment if Rviz has issues.
-    cost_data_msg.data = traversability_map.flatten().tolist()
-
-    cost_map_msg.data = [cost_data_msg]
-
-    # Publish the GridMap message
-    cost_map_viz_pub.publish(cost_map_msg)
